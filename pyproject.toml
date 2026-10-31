@@ -20,23 +20,23 @@ requires = ["toga"]
 
 [tool.briefcase.app.nika.android]
 requires = ["toga-android", "certifi"]
-permission = [
-    "android.permission.INTERNET",
-    "android.permission.ACCESS_NETWORK_STATE",
-    "android.permission.ACCESS_WIFI_STATE",
-    "android.permission.CHANGE_WIFI_STATE",
-    "android.permission.ACCESS_FINE_LOCATION",
-    "android.permission.ACCESS_COARSE_LOCATION",
-    "android.permission.CALL_PHONE",
-    "android.permission.READ_CONTACTS",
-    "android.permission.SEND_SMS",
-    "android.permission.RECORD_AUDIO",
-    "android.permission.CAMERA",
-    "android.permission.POST_NOTIFICATIONS",
-    "android.permission.VIBRATE",
-    "android.permission.QUERY_ALL_PACKAGES",
-    "android.permission.FOREGROUND_SERVICE",
-]
+
+# Используй формат "permission.название_разрешения = "описание""
+permission.internet = "Для работы сети"
+permission.access_network_state = "Для проверки сети"
+permission.access_wifi_state = "Для работы с Wi-Fi"
+permission.change_wifi_state = "Для управления Wi-Fi"
+permission.access_fine_location = "Для определения местоположения"
+permission.access_coarse_location = "Для определения местоположения"
+permission.call_phone = "Для совершения звонков"
+permission.read_contacts = "Для доступа к контактам"
+permission.send_sms = "Для отправки SMS"
+permission.record_audio = "Для голосового ввода"
+permission.camera = "Для работы камеры"
+permission.post_notifications = "Для уведомлений"
+permission.vibrate = "Для вибрации"
+permission.query_all_packages = "Для запуска приложений"
+permission.foreground_service = "Для фоновых задач"
 
 [tool.briefcase.app.nika.windows]
 requires = ["toga-winforms"]
