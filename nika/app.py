@@ -529,7 +529,7 @@ class NikaApp(toga.App):
     # ------------------------------------------------------------------
     #  Фоновый цикл
     # ------------------------------------------------------------------
-    async def _ticker(self, *args, **kwargs):
+        async def _ticker(self, *args, **kwargs):
         if self._ticker_active:
             return
         self._ticker_active = True
@@ -571,6 +571,15 @@ class NikaApp(toga.App):
                     self._add_message(reply.text, False)
                     self._set_chips(reply.chips)
             self._next_idle = now + random.randint(20 * 60, 40 * 60)
+
+        # --- ВОТ ЭТОТ БЛОК МЫ ДОБАВИЛИ ---
+        # Он каждую секунду будет принудительно опускать экран вниз,
+        # перебивая баг Toga, который сбрасывает скролл наверх.
+        try:
+            self.scroll.vertical_position = 1.0
+        except Exception:
+            pass
+        # ----------------------------------
 
     def _flush_deferred(self):
         try:
