@@ -194,16 +194,23 @@ class NikaApp(toga.App):
     #  Сообщения
     # ------------------------------------------------------------------
     def _add_message(self, text, mine=False):
-        row = toga.Box(style=_pack(direction="row", padding=(3, 6, 3, 6)))
-        label = toga.Label(
-            text,
-            style=_pack(flex=1, padding=(9, 11, 9, 11), font_size=15,
-                        color=theme.USER_TEXT if mine else theme.ACCENT,
-                        background_color=theme.BUBBLE_MINE if mine else theme.BUBBLE,
-                        text_align="right" if mine else "left"))
-        row.add(label)
-        self.chat_box.add(row)
-        self._scroll_end()
+    # Контейнер для сообщения (вертикальный, чтобы текст мог переноситься)
+    bubble_container = toga.Box(style=_pack(direction="column", padding=(3, 6, 3, 6)))
+    
+    label = toga.Label(
+        text,
+        style=_pack(
+            flex=1,  # Важно: flex позволяет лейблу занимать доступную ширину
+            padding=(9, 11, 9, 11),
+            font_size=15,
+            color=theme.USER_TEXT if mine else theme.ACCENT,
+            background_color=theme.BUBBLE_MINE if mine else theme.BUBBLE,
+            text_align="right" if mine else "left"
+        )
+    )
+    bubble_container.add(label)
+    self.chat_box.add(bubble_container)
+    self._scroll_end()
 
     def _scroll_end(self):
         try:
