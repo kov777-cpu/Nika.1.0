@@ -2,6 +2,8 @@
 project_name = "Nika"
 bundle = "org.nikaassistant"
 version = "2.1.0"
+license = "MIT"
+license-files = ["LICENSE"]
 url = "https://github.com/nika-assistant"
 author = "Nika"
 author_email = "nika@example.invalid"
