@@ -132,8 +132,6 @@ class DesktopBridge(Bridge):
 
     # ---------- голос и уведомления ----------
     def speak(self, text, female=True):
-        # ПУНКТ 3: на ПК просто печатаем, но параметр принимаем,
-        # чтобы app.py не падал.
         try:
             print("[Nika говорит%s] %s" % (" (жен.)" if female else "", text))
         except Exception:
@@ -145,7 +143,6 @@ class DesktopBridge(Bridge):
 
     def notify(self, title, text):
         print("[Nika] %s: %s" % (title, text))
-        # ПУНКТ 2: на ПК даём слышимый сигнал
         self.beep()
         return Res(True, "")
 
@@ -155,9 +152,7 @@ class DesktopBridge(Bridge):
     def open_settings(self, page=""):
         return Res(False, "настройки телефона — на телефоне.")
 
-    # ---------- ПУНКТ 2/7: короткие звуки ----------
     def beep(self):
-        """Короткий звук уведомления: терминальный bell, если есть."""
         try:
             sys.stdout.write("\a")
             sys.stdout.flush()
@@ -166,7 +161,6 @@ class DesktopBridge(Bridge):
         return Res(True, "")
 
     def tap(self):
-        """Короткий клик нажатия — на ПК просто тихий bell."""
         try:
             sys.stdout.write("\a")
             sys.stdout.flush()
