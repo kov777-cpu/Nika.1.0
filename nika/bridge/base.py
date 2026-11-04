@@ -110,7 +110,8 @@ class Bridge:
         return Res(False, "")
 
     # ---------- голос ----------
-    def speak(self, text: str) -> Res:
+    def speak(self, text: str, female: bool = True) -> Res:
+        """ПУНКТ 3: female=True — просим женский голос, если мост умеет."""
         return Res(False, "")
 
     def stop_speak(self) -> Res:
@@ -118,6 +119,15 @@ class Bridge:
 
     def listen(self, callback: Callable[[Optional[str]], None]) -> Res:
         return Res(False, "голосовой ввод работает на телефоне.")
+
+    # ---------- ПУНКТ 2/7: короткие звуки ----------
+    def beep(self) -> Res:
+        """Короткий звук уведомления (таймер/напоминание)."""
+        return Res(False, "")
+
+    def tap(self) -> Res:
+        """Очень короткий тихий клик нажатия."""
+        return Res(False, "")
 
     # ---------- wi-fi ----------
     def wifi_info(self) -> Dict[str, Any]:
