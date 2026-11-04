@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Nika для Android на BeeWare: Toga + Briefcase.
 
-Интерфейс собран из нативных виджетов Toga: заголовок, лента сообщений,
+Интерфейс собран из нативных виджетов Toga: лента сообщений,
 подсказки-кнопки, строка ввода, таймер сверху. Палитра — из Windows-версии.
 
 Вся логика (engine / persona / nlp / store) не зависит от UI и проверяется
@@ -31,7 +31,8 @@ def _pack(**kwargs):
         return Pack(**kwargs)
     except Exception:
         for key in ("background_color", "gap", "text_align", "font_weight",
-                    "color", "font_size", "padding"):
+                    "color", "font_size", "padding", "margin", "width", "height",
+                    "flex"):
             kwargs.pop(key, None)
         return Pack(**kwargs)
 
@@ -58,6 +59,7 @@ class NikaApp(toga.App):
         self._ticker_active = False
         self._last_activity = time.time()
         self._next_idle = time.time() + random.randint(20 * 60, 40 * 60)
+        self._screen_w = 360  # обновится в startup
 
     def startup(self):
         self._prepare_data()
@@ -68,7 +70,6 @@ class NikaApp(toga.App):
         try:
             self._loop = asyncio.get_running_loop()
         except RuntimeError:
-            # startup может вызываться вне цикла: тогда цикл подхватит _ticker
             try:
                 self._loop = asyncio.get_event_loop_policy().get_event_loop()
             except Exception:
@@ -78,7 +79,6 @@ class NikaApp(toga.App):
             self.add_background_task(self._ticker)
         except Exception:
             pass
-        # на случай, если API фоновых задач отличается — заведём задачу сами
         try:
             asyncio.get_running_loop().call_soon(self._ensure_ticker)
         except Exception:
@@ -120,22 +120,24 @@ class NikaApp(toga.App):
         self.root = toga.Box(style=_pack(direction="column",
                                          background_color=theme.BG))
 
-        # ---------- шапка: только имя, кнопки голоса и помощи ----------
-        header = toga.Box(style=_pack(direction="row", padding=8, gap=6))
-        title = toga.Label("Nika", style=_pack(
-            color=theme.ACCENT, font_size=24, font_weight="bold",
-            padding=(6, 8, 6, 8), flex=1))
+        # ---------- ПУНКТ 4: убрана верхняя шапка «Nika» ----------
+        # Заголовок остаётся только в системном окне (MainWindow.title),
+        # а чат начинается сразу под статус-баром.
+        # Но кнопки голоса/помощи нужны — вынесем их в тонкую строку
+        # без крупного заголовка.
+        header = toga.Box(style=_pack(direction="row", padding=(4, 8, 4, 8), gap=6))
         self.voice_button = toga.Button(
             "голос" if self._voice else "тихо",
             on_press=self._on_voice,
-            style=_pack(width=86, height=36, font_size=13,
+            style=_pack(width=78, height=32, font_size=12,
                         background_color=theme.ACCENT if self._voice else theme.CHIP,
                         color=theme.ON_ACCENT if self._voice else theme.MUTED_LIGHT))
         help_button = toga.Button(
             "?", on_press=self._on_help,
-            style=_pack(width=44, height=36, font_size=15,
+            style=_pack(width=38, height=32, font_size=14,
                         background_color=theme.CHIP, color=theme.MUTED_LIGHT))
-        header.add(title)
+        spacer = toga.Box(style=_pack(flex=1))
+        header.add(spacer)
         header.add(self.voice_button)
         header.add(help_button)
         self.root.add(header)
@@ -159,13 +161,10 @@ class NikaApp(toga.App):
         self.scroll.content = self.chat_box
         self.root.add(self.scroll)
 
-        # ---------- подсказки ----------
-        self.chips_box = toga.Box(style=_pack(direction="row", padding=(4, 8, 4, 8),
-                                              gap=6))
-        self.chips_scroll = toga.ScrollContainer(horizontal=True, vertical=False,
-                                                 style=_pack(height=48))
-        self.chips_scroll.content = self.chips_box
-        self.root.add(self.chips_scroll)
+        # ---------- ПУНКТ 1/6: подсказки в две строки, без горизонтального скролла ----------
+        self.chips_box = toga.Box(style=_pack(direction="column", padding=(4, 8, 4, 8),
+                                              gap=4))
+        self.root.add(self.chips_box)
 
         # ---------- строка ввода ----------
         input_row = toga.Box(style=_pack(direction="row", padding=(8, 10, 8, 10),
@@ -177,11 +176,11 @@ class NikaApp(toga.App):
                         color=theme.ACCENT))
         mic = toga.Button(
             "мик.", on_press=self._on_mic,
-            style=_pack(width=62, height=40, font_size=13,
+            style=_pack(width=58, height=40, font_size=13,
                         background_color=theme.CHIP, color=theme.MUTED_LIGHT))
         send = toga.Button(
             "→", on_press=self._on_send,
-            style=_pack(width=52, height=40, font_size=18,
+            style=_pack(width=48, height=40, font_size=18,
                         background_color=theme.ACCENT, color=theme.ON_ACCENT))
         input_row.add(self.input)
         input_row.add(mic)
@@ -191,26 +190,43 @@ class NikaApp(toga.App):
         return self.root
 
     # ------------------------------------------------------------------
+    #  ПУНКТ 7: короткий звук нажатия
+    # ------------------------------------------------------------------
+    def _tap(self):
+        try:
+            fn = getattr(self.bridge, "tap", None)
+            if callable(fn):
+                fn()
+        except Exception:
+            pass
+
+    def _beep(self):
+        try:
+            fn = getattr(self.bridge, "beep", None)
+            if callable(fn):
+                fn()
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
     #  Сообщения
     # ------------------------------------------------------------------
     def _add_message(self, text, mine=False):
-    # Контейнер для сообщения (вертикальный, чтобы текст мог переноситься)
-    bubble_container = toga.Box(style=_pack(direction="column", padding=(3, 6, 3, 6)))
-    
-    label = toga.Label(
-        text,
-        style=_pack(
-            flex=1,  # Важно: flex позволяет лейблу занимать доступную ширину
-            padding=(9, 11, 9, 11),
-            font_size=15,
-            color=theme.USER_TEXT if mine else theme.ACCENT,
-            background_color=theme.BUBBLE_MINE if mine else theme.BUBBLE,
-            text_align="right" if mine else "left"
-        )
-    )
-    bubble_container.add(label)
-    self.chat_box.add(bubble_container)
-    self._scroll_end()
+        row = toga.Box(style=_pack(direction="row", padding=(3, 6, 3, 6)))
+        # ПУНКТ 1: multiline Label с flex и переносом по словам
+        label = toga.Label(
+            text,
+            style=_pack(flex=1, padding=(9, 11, 9, 11), font_size=15,
+                        color=theme.USER_TEXT if mine else theme.ACCENT,
+                        background_color=theme.BUBBLE_MINE if mine else theme.BUBBLE,
+                        text_align="right" if mine else "left"))
+        try:
+            label.multiline = True  # в Toga 0.4+ Label умеет перенос
+        except Exception:
+            pass
+        row.add(label)
+        self.chat_box.add(row)
+        self._scroll_end()
 
     def _scroll_end(self):
         try:
@@ -244,32 +260,40 @@ class NikaApp(toga.App):
         if self._typing is not None and self._typing_label is not None:
             self._typing_label.text = text
 
+    # ------------------------------------------------------------------
+    #  ПУНКТ 6: подсказки в две строки, ширина по экрану
+    # ------------------------------------------------------------------
     def _set_chips(self, items):
         for child in list(self.chips_box.children):
             try:
                 self.chips_box.remove(child)
             except Exception:
                 pass
-        for item in list(items)[:6]:
-            if not item:
+        items = [i for i in list(items)[:6] if i]
+        if not items:
+            return
+        rows = [items[:3], items[3:6]]
+        for row_items in rows:
+            if not row_items:
                 continue
-            width = min(240, 28 + 8 * len(item))
-            button = toga.Button(
-                item,
-                on_press=functools.partial(self._on_chip, item),
-                style=_pack(width=width, height=36, font_size=13,
-                            background_color=theme.CHIP,
-                            color=theme.MUTED_LIGHT))
-            try:
-                self.chips_box.add(button)
-            except Exception:
-                pass
+            row = toga.Box(style=_pack(direction="row", padding=(0, 0, 0, 0), gap=4))
+            for item in row_items:
+                # ширина по числу символов, но не больше трети экрана
+                width = max(64, min(int(self._screen_w / 3) - 8,
+                                    28 + 7 * len(item)))
+                button = toga.Button(
+                    item,
+                    on_press=functools.partial(self._on_chip, item),
+                    style=_pack(width=width, height=34, font_size=12,
+                                background_color=theme.CHIP,
+                                color=theme.CHIP_TEXT))
+                row.add(button)
+            self.chips_box.add(row)
 
     # ------------------------------------------------------------------
     #  Действия пользователя
     # ------------------------------------------------------------------
     def _spawn(self, coro):
-        """Запускает корутину в цикле Toga, даже если обработчик синхронный."""
         self._ensure_ticker()
         try:
             asyncio.get_running_loop().create_task(coro)
@@ -297,18 +321,23 @@ class NikaApp(toga.App):
             pass
 
     def _on_confirm(self, widget, **kwargs):
+        self._tap()
         self._spawn(self._send(self.input.value))
 
     def _on_send(self, widget, **kwargs):
+        self._tap()
         self._spawn(self._send(self.input.value))
 
     def _on_chip(self, text, widget, **kwargs):
+        self._tap()
         self._spawn(self._send(text))
 
     def _on_help(self, widget, **kwargs):
+        self._tap()
         self._spawn(self._send("что ты умеешь"))
 
     def _on_voice(self, widget, **kwargs):
+        self._tap()
         self._voice = not self._voice
         self.store.set_pref("voice", self._voice)
         self.store.save()
@@ -327,9 +356,11 @@ class NikaApp(toga.App):
         self._remember_activity()
 
     def _on_stop_timer(self, widget, **kwargs):
+        self._tap()
         self._stop_timers(announce=True)
 
     def _on_mic(self, widget, **kwargs):
+        self._tap()
         self._spawn(self._mic_flow())
 
     async def _mic_flow(self):
@@ -412,7 +443,7 @@ class NikaApp(toga.App):
         self._next_idle = time.time() + random.randint(20 * 60, 40 * 60)
 
     # ------------------------------------------------------------------
-    #  Голос
+    #  ПУНКТ 3: голос
     # ------------------------------------------------------------------
     def _speak(self, text):
         if not self.bridge.can_voice:
@@ -421,7 +452,13 @@ class NikaApp(toga.App):
         if not phrase:
             return
         try:
-            self.bridge.speak(phrase)
+            # female=True — просим женский русский голос
+            self.bridge.speak(phrase, female=True)
+        except TypeError:
+            try:
+                self.bridge.speak(phrase)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -435,7 +472,7 @@ class NikaApp(toga.App):
             pass
 
     # ------------------------------------------------------------------
-    #  Таймеры и напоминания
+    #  ПУНКТ 2: таймеры и напоминания со звуком
     # ------------------------------------------------------------------
     def _run_actions(self, actions):
         for action in actions or []:
@@ -491,10 +528,18 @@ class NikaApp(toga.App):
             "всё, таймер закончился.",
             "дзынь! время вышло.",
         ]), False)
+        # ПУНКТ 2: звук + вибрация + уведомление, каждое отдельно в try
+        try:
+            self._beep()
+        except Exception:
+            pass
         try:
             self.bridge.notify("Nika — таймер",
                                item.get("label", "таймер") + ": время вышло")
-            self.bridge.vibrate(120)
+        except Exception:
+            pass
+        try:
+            self.bridge.vibrate(200)
         except Exception:
             pass
         self._speak("Время вышло")
@@ -510,9 +555,17 @@ class NikaApp(toga.App):
                 "напоминаю: %s" % text,
                 "не забыть: %s" % text,
             ]), False)
+            # ПУНКТ 2: звук, уведомление, вибрация
+            try:
+                self._beep()
+            except Exception:
+                pass
             try:
                 self.bridge.notify("Nika напоминает", text)
-                self.bridge.vibrate(150)
+            except Exception:
+                pass
+            try:
+                self.bridge.vibrate(200)
             except Exception:
                 pass
             self._speak("Напоминаю: " + text)
@@ -529,7 +582,7 @@ class NikaApp(toga.App):
     # ------------------------------------------------------------------
     #  Фоновый цикл
     # ------------------------------------------------------------------
-        async def _ticker(self, *args, **kwargs):
+    async def _ticker(self, *args, **kwargs):
         if self._ticker_active:
             return
         self._ticker_active = True
@@ -571,15 +624,6 @@ class NikaApp(toga.App):
                     self._add_message(reply.text, False)
                     self._set_chips(reply.chips)
             self._next_idle = now + random.randint(20 * 60, 40 * 60)
-
-        # --- ВОТ ЭТОТ БЛОК МЫ ДОБАВИЛИ ---
-        # Он каждую секунду будет принудительно опускать экран вниз,
-        # перебивая баг Toga, который сбрасывает скролл наверх.
-        try:
-            self.scroll.vertical_position = 1.0
-        except Exception:
-            pass
-        # ----------------------------------
 
     def _flush_deferred(self):
         try:
