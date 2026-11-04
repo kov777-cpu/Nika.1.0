@@ -4,8 +4,8 @@
 Интерфейс собран из нативных виджетов Toga: лента сообщений,
 подсказки-кнопки, строка ввода, таймер сверху. Палитра — из Windows-версии.
 
-Вся логика (engine / persona / nlp / store) не зависит от UI и проверяется
-тестами на компьютере; здесь только представление и фоновые задачи.
+Все вызовы bridge.* обёрнуты в getattr/fallback: если мост старый и чего-то
+не умеет, приложение не падает, а просто теряет эту функцию.
 """
 
 import asyncio
@@ -22,11 +22,6 @@ from .bridge import get_bridge
 
 
 def _pack(**kwargs):
-    """Стиль с запасным вариантом.
-
-    На разных версиях Toga набор свойств Pack чуть отличается. Если свойство
-    не поддержано, лучше потерять оформление, чем уронить всё приложение.
-    """
     try:
         return Pack(**kwargs)
     except Exception:
@@ -37,10 +32,25 @@ def _pack(**kwargs):
         return Pack(**kwargs)
 
 
+def _safe_bridge_call(bridge, name, *args, **kwargs):
+    """Вызывает метод моста, если он есть и не падает. Возвращает None при ошибке."""
+    if bridge is None:
+        return None
+    fn = getattr(bridge, name, None)
+    if not callable(fn):
+        return None
+    try:
+        return fn(*args, **kwargs)
+    except TypeError:
+        try:
+            return fn(*args)
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
 class NikaApp(toga.App):
-    # ------------------------------------------------------------------
-    #  Запуск
-    # ------------------------------------------------------------------
     def __init__(self):
         super().__init__("Nika", "org.nikaassistant.nika")
         self.store = None
@@ -59,13 +69,25 @@ class NikaApp(toga.App):
         self._ticker_active = False
         self._last_activity = time.time()
         self._next_idle = time.time() + random.randint(20 * 60, 40 * 60)
-        self._screen_w = 360  # обновится в startup
+        self._screen_w = 360
+        self._startup_error = ""
 
+    # ------------------------------------------------------------------
+    #  Запуск
+    # ------------------------------------------------------------------
     def startup(self):
-        self._prepare_data()
-        self.main_window = toga.MainWindow(title="Nika")
-        self.main_window.content = self._build_ui()
-        self.main_window.show()
+        try:
+            self._prepare_data()
+        except Exception as exc:
+            self._startup_error = "данные: %s" % exc
+
+        try:
+            self.main_window = toga.MainWindow(title="Nika")
+            self.main_window.content = self._build_ui()
+            self.main_window.show()
+        except Exception as exc:
+            print("[Nika/startup] UI: %s" % exc)
+            raise
 
         try:
             self._loop = asyncio.get_running_loop()
@@ -84,15 +106,17 @@ class NikaApp(toga.App):
         except Exception:
             pass
 
-        self._greet()
+        try:
+            self._greet()
+        except Exception as exc:
+            self._add_message("не смогла поздороваться: %s" % exc, False)
 
-        # на Android 13+ без этого разрешения не будет уведомлений от таймеров
+        if self._startup_error:
+            self._add_message("запуск с замечанием: %s" % self._startup_error, False)
+
         if getattr(self.bridge, "is_android", False):
-            try:
-                self.bridge.request_permissions(["POST_NOTIFICATIONS"],
-                                                lambda ok: None)
-            except Exception:
-                pass
+            _safe_bridge_call(self.bridge, "request_permissions",
+                              ["POST_NOTIFICATIONS"], lambda ok: None)
 
     def _prepare_data(self):
         path = None
@@ -109,9 +133,17 @@ class NikaApp(toga.App):
 
         self.store = Store(path)
         self._voice = bool(self.store.pref("voice", True))
-        self.bridge, note = get_bridge(verbose=True)
-        self.engine = Engine(self.bridge, self.store,
-                             status_cb=self._status_from_thread)
+        try:
+            self.bridge, _note = get_bridge(verbose=True)
+        except Exception as exc:
+            print("[Nika] bridge: %s" % exc)
+            self.bridge = None
+        try:
+            self.engine = Engine(self.bridge, self.store,
+                                 status_cb=self._status_from_thread)
+        except Exception as exc:
+            print("[Nika] engine: %s" % exc)
+            self.engine = None
 
     # ------------------------------------------------------------------
     #  Интерфейс
@@ -120,11 +152,7 @@ class NikaApp(toga.App):
         self.root = toga.Box(style=_pack(direction="column",
                                          background_color=theme.BG))
 
-        # ---------- ПУНКТ 4: убрана верхняя шапка «Nika» ----------
-        # Заголовок остаётся только в системном окне (MainWindow.title),
-        # а чат начинается сразу под статус-баром.
-        # Но кнопки голоса/помощи нужны — вынесем их в тонкую строку
-        # без крупного заголовка.
+        # тонкая строка кнопок без заголовка «Nika»
         header = toga.Box(style=_pack(direction="row", padding=(4, 8, 4, 8), gap=6))
         self.voice_button = toga.Button(
             "голос" if self._voice else "тихо",
@@ -135,38 +163,38 @@ class NikaApp(toga.App):
         help_button = toga.Button(
             "?", on_press=self._on_help,
             style=_pack(width=38, height=32, font_size=14,
-                        background_color=theme.CHIP, color=theme.MUTED_LIGHT))
-        spacer = toga.Box(style=_pack(flex=1))
-        header.add(spacer)
+                        background_color=theme.CHIP, color=theme.CHIP_TEXT))
+        header.add(toga.Box(style=_pack(flex=1)))
         header.add(self.voice_button)
         header.add(help_button)
         self.root.add(header)
 
-        # ---------- полоса таймера (появляется при необходимости) ----------
-        self._timer_row = toga.Box(style=_pack(direction="row", padding=(6, 10, 6, 10),
+        # полоса таймера
+        self._timer_row = toga.Box(style=_pack(direction="row",
+                                               padding=(6, 10, 6, 10),
                                                background_color=theme.BUBBLE))
         self._timer_label = toga.Label("", style=_pack(
             flex=1, color=theme.ACCENT, font_size=14, padding=(4, 6, 4, 6)))
         self._timer_stop = toga.Button(
             "стоп", on_press=self._on_stop_timer,
             style=_pack(width=64, height=30, font_size=12,
-                        background_color=theme.CHIP, color=theme.MUTED_LIGHT))
+                        background_color=theme.CHIP, color=theme.CHIP_TEXT))
         self._timer_row.add(self._timer_label)
         self._timer_row.add(self._timer_stop)
 
-        # ---------- лента сообщений ----------
+        # чат
         self.chat_box = toga.Box(style=_pack(direction="column", padding=6))
         self.scroll = toga.ScrollContainer(horizontal=False, vertical=True,
                                            style=_pack(flex=1))
         self.scroll.content = self.chat_box
         self.root.add(self.scroll)
 
-        # ---------- ПУНКТ 1/6: подсказки в две строки, без горизонтального скролла ----------
-        self.chips_box = toga.Box(style=_pack(direction="column", padding=(4, 8, 4, 8),
-                                              gap=4))
+        # подсказки в две строки
+        self.chips_box = toga.Box(style=_pack(direction="column",
+                                              padding=(4, 8, 4, 8), gap=4))
         self.root.add(self.chips_box)
 
-        # ---------- строка ввода ----------
+        # ввод
         input_row = toga.Box(style=_pack(direction="row", padding=(8, 10, 8, 10),
                                          gap=6, background_color=theme.INPUT))
         self.input = toga.TextInput(
@@ -177,7 +205,7 @@ class NikaApp(toga.App):
         mic = toga.Button(
             "мик.", on_press=self._on_mic,
             style=_pack(width=58, height=40, font_size=13,
-                        background_color=theme.CHIP, color=theme.MUTED_LIGHT))
+                        background_color=theme.CHIP, color=theme.CHIP_TEXT))
         send = toga.Button(
             "→", on_press=self._on_send,
             style=_pack(width=48, height=40, font_size=18,
@@ -190,38 +218,27 @@ class NikaApp(toga.App):
         return self.root
 
     # ------------------------------------------------------------------
-    #  ПУНКТ 7: короткий звук нажатия
+    #  Звуки (всё через _safe_bridge_call)
     # ------------------------------------------------------------------
     def _tap(self):
-        try:
-            fn = getattr(self.bridge, "tap", None)
-            if callable(fn):
-                fn()
-        except Exception:
-            pass
+        _safe_bridge_call(self.bridge, "tap")
 
     def _beep(self):
-        try:
-            fn = getattr(self.bridge, "beep", None)
-            if callable(fn):
-                fn()
-        except Exception:
-            pass
+        _safe_bridge_call(self.bridge, "beep")
 
     # ------------------------------------------------------------------
     #  Сообщения
     # ------------------------------------------------------------------
     def _add_message(self, text, mine=False):
         row = toga.Box(style=_pack(direction="row", padding=(3, 6, 3, 6)))
-        # ПУНКТ 1: multiline Label с flex и переносом по словам
         label = toga.Label(
-            text,
+            text or "",
             style=_pack(flex=1, padding=(9, 11, 9, 11), font_size=15,
                         color=theme.USER_TEXT if mine else theme.ACCENT,
                         background_color=theme.BUBBLE_MINE if mine else theme.BUBBLE,
                         text_align="right" if mine else "left"))
         try:
-            label.multiline = True  # в Toga 0.4+ Label умеет перенос
+            label.multiline = True
         except Exception:
             pass
         row.add(label)
@@ -260,9 +277,6 @@ class NikaApp(toga.App):
         if self._typing is not None and self._typing_label is not None:
             self._typing_label.text = text
 
-    # ------------------------------------------------------------------
-    #  ПУНКТ 6: подсказки в две строки, ширина по экрану
-    # ------------------------------------------------------------------
     def _set_chips(self, items):
         for child in list(self.chips_box.children):
             try:
@@ -276,9 +290,8 @@ class NikaApp(toga.App):
         for row_items in rows:
             if not row_items:
                 continue
-            row = toga.Box(style=_pack(direction="row", padding=(0, 0, 0, 0), gap=4))
+            row = toga.Box(style=_pack(direction="row", gap=4))
             for item in row_items:
-                # ширина по числу символов, но не больше трети экрана
                 width = max(64, min(int(self._screen_w / 3) - 8,
                                     28 + 7 * len(item)))
                 button = toga.Button(
@@ -339,13 +352,13 @@ class NikaApp(toga.App):
     def _on_voice(self, widget, **kwargs):
         self._tap()
         self._voice = not self._voice
-        self.store.set_pref("voice", self._voice)
-        self.store.save()
+        try:
+            self.store.set_pref("voice", self._voice)
+            self.store.save()
+        except Exception:
+            pass
         if not self._voice:
-            try:
-                self.bridge.stop_speak()
-            except Exception:
-                pass
+            _safe_bridge_call(self.bridge, "stop_speak")
         try:
             self.voice_button.text = "голос" if self._voice else "тихо"
         except Exception:
@@ -364,7 +377,7 @@ class NikaApp(toga.App):
         self._spawn(self._mic_flow())
 
     async def _mic_flow(self):
-        if not self.bridge.can_voice:
+        if self.bridge is None or not getattr(self.bridge, "can_voice", False):
             self._add_message("голосовой ввод работает на телефоне.", False)
             return
         loop = asyncio.get_running_loop()
@@ -383,9 +396,10 @@ class NikaApp(toga.App):
             self._hide_typing()
             self._add_message("микрофон не отвечает: %s" % exc, False)
             return
-        if result is not None and not result.ok:
+        if result is not None and not getattr(result, "ok", False):
             self._hide_typing()
-            self._add_message(result.message or "не смогла включить микрофон.", False)
+            self._add_message(getattr(result, "message", "") or
+                              "не смогла включить микрофон.", False)
             return
 
         try:
@@ -394,10 +408,7 @@ class NikaApp(toga.App):
             text = None
         self._hide_typing()
         if not text:
-            self._add_message(self.engine.p.pick([
-                "не расслышала. повтори, пожалуйста.",
-                "тихо как-то. скажи ещё раз?",
-            ]), False)
+            self._add_message("не расслышала. повтори, пожалуйста.", False)
             return
         self.input.value = text
         await self._send(text)
@@ -407,7 +418,7 @@ class NikaApp(toga.App):
     # ------------------------------------------------------------------
     async def _send(self, text):
         text = (text or "").strip()
-        if not text or self._busy:
+        if not text or self._busy or self.engine is None:
             return
         self._remember_activity()
         self.input.value = ""
@@ -443,24 +454,13 @@ class NikaApp(toga.App):
         self._next_idle = time.time() + random.randint(20 * 60, 40 * 60)
 
     # ------------------------------------------------------------------
-    #  ПУНКТ 3: голос
+    #  Голос
     # ------------------------------------------------------------------
     def _speak(self, text):
-        if not self.bridge.can_voice:
-            return
         phrase = nlp.clean_for_speech(text)
         if not phrase:
             return
-        try:
-            # female=True — просим женский русский голос
-            self.bridge.speak(phrase, female=True)
-        except TypeError:
-            try:
-                self.bridge.speak(phrase)
-            except Exception:
-                pass
-        except Exception:
-            pass
+        _safe_bridge_call(self.bridge, "speak", phrase, female=True)
 
     def _status_from_thread(self, text):
         loop = self._loop
@@ -472,7 +472,7 @@ class NikaApp(toga.App):
             pass
 
     # ------------------------------------------------------------------
-    #  ПУНКТ 2: таймеры и напоминания со звуком
+    #  Таймеры и напоминания
     # ------------------------------------------------------------------
     def _run_actions(self, actions):
         for action in actions or []:
@@ -523,51 +523,26 @@ class NikaApp(toga.App):
                 pass
 
     def _fire_timer(self, item):
-        self._add_message(self.engine.p.pick([
-            "время вышло)",
-            "всё, таймер закончился.",
-            "дзынь! время вышло.",
-        ]), False)
-        # ПУНКТ 2: звук + вибрация + уведомление, каждое отдельно в try
-        try:
-            self._beep()
-        except Exception:
-            pass
-        try:
-            self.bridge.notify("Nika — таймер",
-                               item.get("label", "таймер") + ": время вышло")
-        except Exception:
-            pass
-        try:
-            self.bridge.vibrate(200)
-        except Exception:
-            pass
+        self._add_message("время вышло)", False)
+        self._beep()
+        _safe_bridge_call(self.bridge, "notify", "Nika — таймер",
+                          item.get("label", "таймер") + ": время вышло")
+        _safe_bridge_call(self.bridge, "vibrate", 200)
         self._speak("Время вышло")
 
     def _check_reminders(self):
+        if self.store is None:
+            return
         try:
             due = self.store.due_reminders()
         except Exception:
             return
         for reminder in due:
             text = reminder.get("text", "напоминание")
-            self._add_message(self.engine.p.pick([
-                "напоминаю: %s" % text,
-                "не забыть: %s" % text,
-            ]), False)
-            # ПУНКТ 2: звук, уведомление, вибрация
-            try:
-                self._beep()
-            except Exception:
-                pass
-            try:
-                self.bridge.notify("Nika напоминает", text)
-            except Exception:
-                pass
-            try:
-                self.bridge.vibrate(200)
-            except Exception:
-                pass
+            self._add_message("напоминаю: %s" % text, False)
+            self._beep()
+            _safe_bridge_call(self.bridge, "notify", "Nika напоминает", text)
+            _safe_bridge_call(self.bridge, "vibrate", 200)
             self._speak("Напоминаю: " + text)
             try:
                 self.store.mark_reminder_done(reminder)
@@ -615,7 +590,7 @@ class NikaApp(toga.App):
         self._check_reminders()
 
         if now > self._next_idle:
-            if now - self._last_activity > 10 * 60:
+            if now - self._last_activity > 10 * 60 and self.engine is not None:
                 try:
                     reply = self.engine.idle_message()
                 except Exception:
@@ -626,6 +601,8 @@ class NikaApp(toga.App):
             self._next_idle = now + random.randint(20 * 60, 40 * 60)
 
     def _flush_deferred(self):
+        if self.engine is None:
+            return
         try:
             items = self.engine.take_deferred()
         except Exception:
@@ -648,6 +625,9 @@ class NikaApp(toga.App):
     #  Приветствие
     # ------------------------------------------------------------------
     def _greet(self):
+        if self.engine is None:
+            self._add_message("движок не запустился — смотри консоль.", False)
+            return
         try:
             reply = self.engine.startup()
         except Exception as exc:
