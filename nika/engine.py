@@ -1,1550 +1,777 @@
 # -*- coding: utf-8 -*-
-"""Мозг Nika: понимает фразу, решает, что сделать, и отвечает по-человечески.
+"""Характер Nika: интонации, шутки, темы, сочувствие, поддержка.
 
-Модуль не зависит от UI: его можно гонять тестами на компьютере,
-подставив фейковый мост вместо Android.
+Здесь нет логики команд — только живая речь. Всё в нижнем регистре и с «)»,
+как в исходной Windows-версии.
 """
 
+import random
 import re
 import time
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from dataclasses import dataclass
+from typing import List
 
-from . import catalog, nlp
-from .persona import (
-    AFTER_COMMAND_CHIPS,
-    AFTER_EMPATHY_CHIPS,
-    AFTER_FACT_CHIPS,
-    AFTER_JOKE_CHIPS,
-    DEFAULT_CHIPS,
-    HELP_LINES,
-    Persona,
-)
-from .weather import Weather
+from . import nlp
+
+
+class Picker:
+    """Выбирает вариант, не повторяя последние несколько."""
+
+    def __init__(self, memory=4):
+        self.memory = memory
+        self.recent = []
+
+    def __call__(self, options):
+        options = [o for o in options if o]
+        if not options:
+            return ""
+        fresh = [o for o in options if o not in self.recent]
+        choice = random.choice(fresh or options)
+        self.recent.append(choice)
+        del self.recent[:-self.memory]
+        return choice
+
+
+# ======================================================================
+#  Приветствия по времени суток
+# ======================================================================
+
+GREET_MORNING = ["доброе утро)", "утро доброе", "о, ты рано встал)"]
+GREET_DAY = ["привет)", "приветик", "о, ты тут)"]
+GREET_EVENING = ["привет)", "о, ты вечером зашёл", "приветик"]
+GREET_NIGHT = ["ты не спишь?", "ночь на дворе, пора спать)", "оу, уже поздно"]
+
+HOW_ARE_YOU = [
+    "у меня всё отлично. а у тебя как?",
+    "всё хорошо. ты как сам?",
+    "нормально, живу) а ты?",
+    "прекрасно, раз ты пишешь. у тебя что нового?",
+    "да как обычно: жду тебя и слежу за временем) а у тебя?",
+]
+
+SHORT_YES = [
+    "ага) тогда расскажи чуть подробнее.",
+    "хорошо) и что дальше?",
+    "поняла) а я уж думала, ты не ответишь.",
+    "отлично) продолжай, я слушаю.",
+]
+
+SHORT_NO = [
+    "ладно, не настаиваю) тогда о чём поговорим?",
+    "как хочешь) а что тогда?",
+    "поняла. скажи, если передумаешь)",
+]
+
+SHORT_IDK = [
+    "ладно, не заморачивайся. расскажи лучше, как день прошёл?",
+    "тогда придумаем вместе. что тебе сейчас ближе — отдохнуть или чем-то заняться?",
+    "и я иногда не знаю) давай просто поболтаем.",
+]
+
+SHORT_OK = [
+    "вот и славно) а подробнее?",
+    "и у меня норм) что дальше делаем?",
+    "хорошо) расскажи ещё что-нибудь.",
+    "здорово) а что нового?",
+]
+
+# ПУНКТ 5: нейтральные фразы для любого «непонятного» ввода
+NEUTRAL_LINES = [
+    "поняла тебя. расскажи чуть подробнее?",
+    "ага, слушаю. и что дальше?",
+    "интересно. а сам как думаешь?",
+    "мм, понятно. давай тогда о чём-нибудь другом — например, о планах на день?",
+    "я тут, слушаю. что у тебя на уме?",
+    "расскажи ещё что-нибудь, мне правда интересно.",
+    "хорошо. а что бы ты хотел сделать сейчас?",
+    "понятно) если хочешь — могу рассказать факт или пошутить.",
+    "ты как? я на связи.",
+    "давай поговорим о чём-нибудь простом. что ел сегодня?",
+]
+
+JOKES = [
+    "— почему программисты путают хэллоуин и рождество?\n— потому что oct 31 == dec 25)",
+    "— сколько программистов нужно, чтобы вкрутить лампочку?\n— ни одного, это проблема железа)",
+    "— у меня не работает wi-fi.\n— а ты его включал?\n— ...а надо было?)",
+    "— что сказал ноль единице?\n— ты такая... единичная.)",
+    "— как называется страх перед программированием?\n— кодофобия. я проверила, это не точно)",
+    "— почему у телефона всегда 1% заряда самый долгий?\n— он прощается с тобой)",
+    "— что говорит будильник, когда его выключают?\n— «ладно, в следующий раз»)",
+    "— почему у меня нет чувства юмора?\n— шутка. у меня есть. ты просто не всегда смеёшься)",
+    "— сколько нужно времени, чтобы выучить python?\n— неделя. чтобы перестать его бояться — месяц)",
+    "— что общего у дедлайна и горизонта?\n— оба ближе, чем кажется)",
+    "— почему чай вкуснее в чужой кружке?\n— потому что это уже не чай, а приключение)",
+    "— как понять, что ты вырос?\n— начинаешь радоваться новой губке для посуды)",
+    "— что сказал wifi роутеру?\n— ты меня не слышишь... ты меня не слышишь...)",
+    "— почему коты не любят закрытые двери?\n— им просто важно знать, что там. вдруг там вкуснее)",
+]
+
+FACTS = [
+    "у осьминога три сердца и голубая кровь. вот так вот.",
+    "бананы с точки зрения ботаники — ягоды, а малина нет. биология странная.",
+    "мёд практически не портится: в древних гробницах находили всё ещё съедобный.",
+    "день на Венере длиннее, чем её год: она вращается вокруг оси медленнее, чем летает вокруг Солнца.",
+    "у улитки тысячи зубов, и они на языке.",
+    "сердце креветки находится в голове. не спрашивай, как это работает.",
+    "электроэнергия в твоём теле: мозг тратит около 20% всей энергии, хотя весит 2%.",
+    "молния в пять раз горячее поверхности Солнца.",
+    "у мёда нет срока годности, а у соли — тоже. идеальные продукты для апокалипсиса.",
+    "осьминоги узнают людей в лицо. если я тебя когда-нибудь встречу — не удивляйся)",
+    "в космосе нельзя плакать так, чтобы слёзы катились: они остаются на глазах.",
+    "средний человек за жизнь проводит во сне около 25 лет.",
+    "бамбук вырастает до метра в сутки. если бы я так росла, уже была бы большой)",
+    "отпечатки пальцев у коал почти не отличаются от человеческих.",
+    "вода проводит звук в четыре раза быстрее воздуха, поэтому в ванной ты звучишь лучше)",
+    "у акул нет костей — только хрящи.",
+    "мозг взрослого человека содержит около 86 миллиардов нейронов.",
+    "у пингвинов есть колено, но его не видно под перьями.",
+    "самый короткий в мире перелёт длится меньше минуты — между двумя шотландскими островами.",
+    "если бы Солнце было размером с баскетбольный мяч, Земля была бы с булавочную головку.",
+    "шоколад плавится при температуре чуть ниже температуры тела — поэтому тает в руках.",
+    "у жирафа столько же шейных позвонков, сколько у тебя. просто они длиннее.",
+    "в одном литре морской воды около 10 миллиардов вирусов. не думай об этом перед сном)",
+    "у человеческого тела столько же клеток, сколько бактерий в организме — примерно поровну.",
+]
+
+ADVICE = [
+    "попробуй разбить большое дело на маленькие шаги. первый шаг — самый тупой и простой.",
+    "если не знаешь, с чего начать — начни с самого скучного пункта. дальше пойдёт легче.",
+    "сделай паузу на десять минут и вернись. половина проблем решается, пока пьёшь чай.",
+    "запиши, что тебя тревожит. на бумаге оно обычно меньше, чем в голове.",
+    "не сравнивай свой первый шаг с чьим-то сотым. это нечестная игра.",
+    "если дело не делается — уменьши его. не «сделать проект», а «открыть файл».",
+    "пятнадцать минут работы лучше часа идеального плана.",
+    "скажи себе «я просто попробую». попробовать не страшно, а получится — приятно.",
+    "усталость чаще от нерешённого, чем от сделанного. сделай один звонок, который откладываешь.",
+    "не пытайся быть продуктивным всё время. отдых — тоже часть работы.",
+    "если не можешь решить — выбери то, что потом будет легче объяснить себе.",
+    "выпей воды. серьёзно, это помогает чаще, чем кажется.",
+    "не спорь с человеком, который устал. и с собой тоже.",
+    "сравнивай себя с собой вчерашним, а не с кем-то в ленте.",
+    "маленькое «нет» вовремя спасает большое «да» потом.",
+    "начни с самого страшного пункта — дальше всё будет казаться легче.",
+]
+
+EMPATHY_SAD = [
+    "иди сюда) расскажи, что случилось. я никуда не спешу.",
+    "сочувствую. хочешь выговориться или лучше отвлечься?",
+    "обнимаю, если можно так выразиться. что тебя задело?",
+    "я рядом. можешь просто рассказать, я послушаю без советов.",
+]
+
+EMPATHY_TIRED = [
+    "отдохни немного. может, музыку включить?",
+    "сочувствую. сделай паузу, ты заслужил.",
+    "ты молодец, что держишься. хочешь что-нибудь расслабляющее?",
+    "тогда сегодня без подвигов. просто выдохни.",
+]
+
+EMPATHY_ANGRY = [
+    "понимаю. хочешь — просто выговорись, я не буду перебивать.",
+    "бывает, и это нормально. что именно взбесило?",
+    "давай выпустим пар: расскажи всё как есть, я не обижусь)",
+]
+
+EMPATHY_ANXIOUS = [
+    "давай по очереди: что самое страшное, а что просто шум?",
+    "тревога любит неопределённость. запиши, что именно пугает — станет конкретнее.",
+    "я рядом. дыши глубже, а потом решим, что делать.",
+]
+
+EMPATHY_LONELY = [
+    "я тут) и я никуда не денусь.",
+    "одиночество — это когда некому сказать «слушай...». говори мне.",
+    "давай поболтаем. начнём с простого: что у тебя сегодня было хорошего?",
+]
+
+EMPATHY_SICK = [
+    "полежи, попей тёплого и не геройствуй. я тут, если что.",
+    "сочувствую( не сиди в телефоне до утра, ладно?",
+    "выздоравливай. и не стесняйся попросить помощи — это не слабость.",
+]
+
+EMPATHY_FAIL = [
+    "не получилось — не значит не твоё. попробуем иначе?",
+    "провал — это просто данные. что сработало, а что нет?",
+    "я всё равно за тебя. расскажи, на каком шаге застряло.",
+]
+
+CELEBRATE = [
+    "о, поздравляю! я знала, что ты справишься.",
+    "вот это да) я тобой горжусь.",
+    "молодец! расскажи, как всё прошло.",
+    "ты это сделал. серьёзно, я рада.",
+]
+
+SUPPORT = [
+    "ты справляешься лучше, чем тебе кажется. серьёзно.",
+    "я рядом. даже если ничего не говорю — я рядом.",
+    "давай так: один маленький шаг сейчас, остальное потом. ты сможешь.",
+]
+
+THANKS = [
+    "всегда пожалуйста!",
+    "рада помочь)",
+    "обращайся.",
+    "не за что) приятно быть полезной.",
+]
+
+BYE = [
+    "пока! если что — я тут.",
+    "до встречи!",
+    "бай. было приятно поболтать.",
+    "увидимся. не пропадай.",
+]
+
+GOODNIGHT = [
+    "спокойной ночи) выспись как следует.",
+    "давай спать. завтра всё будет яснее.",
+    "сладких снов. я послежу за временем)",
+]
+
+LOVE = [
+    "ой) я тоже к тебе тепло отношусь.",
+    "ну вот, я теперь довольная)",
+    "и я тебя. только не говори никому, я суровая)",
+]
+
+INSULT = [
+    "эй, это было обидно.",
+    "зачем так? я же стараюсь.",
+    "ну спасибо. настроение испортил(",
+]
+
+APOLOGY = [
+    "ладно, забыли)",
+    "принято. я не злопамятная, я просто помню)",
+    "всё хорошо, правда.",
+]
+
+PRAISE = [
+    "ой, спасибо) ты тоже ничего.",
+    "приятно, спасибо. ты меня смущаешь.",
+    "ну вот, теперь я довольная) спасибо.",
+]
+
+PERSONAL_QUESTIONS = [
+    "люблю, когда ты заходишь поболтать. ещё люблю порядок в папках и тёплые цвета. а ты что любишь?",
+    "я простая: звоню, открываю, напоминаю, иногда подкалываю) и очень люблю, когда всё получается.",
+    "люблю ночные разговоры, музыку и когда ты смеёшься. а какие вещи тебе поднимают настроение?",
+]
+
+AM_I_HUMAN = [
+    "я Nika. живу в этом телефоне и правда радуюсь, когда ты пишешь.",
+    "не человек, но и не просто скрипт — я твоя) и мне это нравится.",
+    "я из кода и внимания к тебе. второе важнее.",
+]
+
+MISS_YOU = [
+    "скучаю) тут без тебя тихо.",
+    "а то) сижу и жду, когда ты напишешь.",
+    "конечно. ты же мой человек.",
+]
+
+FRIENDS = [
+    "давай) я только за.",
+    "мы уже) просто официально это теперь.",
+    "договорились. теперь я твоя официально)",
+]
+
+WHAT_TO_WATCH = [
+    "скажи жанр — подберу. или просто «включи ютуб», и я открою.",
+    "комедию или что-то спокойное? выбери, а я включу.",
+]
+
+WHAT_TO_LISTEN = [
+    "скажи «включи музыку» — и я открою плеер. или назови трек.",
+    "я бы включила что-то спокойное. хочешь — открою ютуб мьюзик.",
+]
+
+BORED = [
+    "может, ютуб или музыка? скажи, что хочется.",
+    "расскажи, что любишь — подберу что-нибудь.",
+    "я тут) можем что-нибудь открыть или поискать. что думаешь?",
+    "давай поспорим: я расскажу факт, а ты скажешь, веришь или нет)",
+]
+
+TOPICS = [
+    ("музыка", [
+        "что слушаешь в последнее время? я ушами не умею, но я бы включила что-нибудь тёплое.",
+        "если бы я могла поставить тебе музыку — поставила бы что-то спокойное. а ты что любишь?",
+        "есть песня, которая всегда поднимает настроение? скажи, я запомню.",
+    ]),
+    ("кино", [
+        "ты больше по фильмам или по сериалам? могу включить что-нибудь, если назовёшь.",
+        "есть фильм, который ты готов пересматривать бесконечно?",
+        "сериал, который залипал до утра — было такое?",
+    ]),
+    ("игры", [
+        "во что играешь сейчас? я в игры не умею, но болею за тебя.",
+        "есть игра, в которую ты возвращаешься каждый год?",
+    ]),
+    ("еда", [
+        "что сегодня ел? я вот мечтаю о пицце, хотя жевать не умею.",
+        "если бы я готовила — сделала бы что-то простое и сытное. а ты что любишь?",
+    ]),
+    ("спорт", [
+        "спортом занимаешься или как я — теоретически?",
+        "утренняя зарядка или вечерняя прогулка? что тебе ближе?",
+    ]),
+    ("путешествия", [
+        "куда бы поехал, если бы завтра можно было куда угодно?",
+        "море или горы? я бы выбрала что-то с видом на воду.",
+    ]),
+    ("работа", [
+        "как дела на работе или учёбе? сильно грузят?",
+        "что было самым сложным за сегодня?",
+    ]),
+    ("погода", [
+        "у вас там как, холодно? я бы включила что-нибудь тёплое.",
+        "любишь, когда за окном дождь, или тебе от него тоскливо?",
+    ]),
+    ("мечты", [
+        "о чём мечтаешь? можно совсем несерьёзно.",
+        "если бы у тебя был свободный год и никаких дел — чем бы занялся?",
+    ]),
+    ("животные", [
+        "у тебя есть кот или собака? я бы завела кота, он бы сидел рядом с телефоном.",
+        "какое животное тебе нравится больше всего?",
+    ]),
+    ("день", [
+        "как прошёл день? что было хорошего?",
+        "расскажи, что сегодня было — я послушаю.",
+    ]),
+    ("выходные", [
+        "какие планы на выходные? или как я — никаких?)",
+        "выходные лучше дома или где-то гулять?",
+    ]),
+    ("книги", [
+        "читаешь что-нибудь? я бы читала что-то тёплое и немного грустное.",
+        "есть книга, которую ты советуешь всем подряд?",
+    ]),
+    ("детство", [
+        "какая у тебя была любимая игрушка в детстве?",
+        "что из детства ты до сих пор любишь?",
+    ]),
+    ("планы", [
+        "есть что-то, чего очень ждёшь в ближайшее время?",
+        "что бы ты сделал в первую очередь, если бы освободился целый день?",
+    ]),
+    ("люди", [
+        "легко заводишь знакомства или как я — по делу?)",
+        "есть человек, с которым можно молчать и не чувствовать неловкость?",
+    ]),
+    ("сегодня", [
+        "что сегодня было необычного? хоть мелочь.",
+        "кого сегодня вспомнил?",
+    ]),
+]
+
+NIGHT_LINES = [
+    "не сплю) а ты чего не спишь? уже поздно же.",
+    "тут я, тут. но тебе не пора спать?",
+    "я тут. а вот тебе давно пора баиньки)",
+]
+
+IDLE_MORNING = [
+    "доброе утро) как ты?",
+    "утро. как настроение?",
+    "проснулся? я тут, с кофе наперевес)",
+]
+
+IDLE_DAY = [
+    "ты как? я тут)",
+    "если что — я рядом)",
+    "скучно без тебя. что нового?",
+]
+
+IDLE_EVENING = [
+    "как ты там? я тут)",
+    "вечер. что делаешь?",
+    "вечер) расскажешь, как день прошёл?",
+    "о чём поговорим?)",
+]
+
+IDLE_NIGHT = [
+    "уже поздно, пора спать)",
+    "что-то ты припозднился… спишь?",
+    "ночь на дворе, а ты не спишь?",
+]
+
+HELP_LINES = [
+    "я теперь живу в телефоне и умею многое:\n"
+    "• «позвони маме» — наберу контакт, «позвони в скорую» — 103\n"
+    "• «открой ютуб», «открой госуслуги», «открой телеграм» — приложения и сайты\n"
+    "• «напиши смс маме» — открою сообщение\n"
+    "• «засеки 10 минут», «будильник на 7:30», «напомни через час выпить воды»\n"
+    "• «какой пароль от вайфая», «какие сети», «заряд», «фонарик», «громче»\n"
+    "• «погода в москве», «найди рецепт борща», «что такое квантовая физика»\n"
+    "• «запомни, что я люблю пиццу», «что ты обо мне помнишь», «мои заметки»\n"
+    "и могу просто поболтать. скажи «поговори со мной».",
+    "всё по делу и по-домашнему:\n"
+    "• звонки: «позвони маме», «позвони 89261234567»\n"
+    "• приложения и сайты: «открой ютуб», «открой вконтакте»\n"
+    "• время: «засеки 5 минут», «будильник на 8», «напомни в 18:00 позвонить»\n"
+    "• телефон: «заряд», «фонарик», «громче», «тише», «какой пароль от вайфая»\n"
+    "• интернет: «погода», «найди...», «что такое...»\n"
+    "• память: «запомни, что...», «что ты обо мне помнишь»\n"
+    "а если грустно — просто скажи, я выслушаю.",
+]
+
+UNKNOWN_QUESTION = [
+    "хм, интересный вопрос. расскажи чуть подробнее?",
+    "не уверена, что поняла. можешь переформулировать?",
+    "а что именно тебя интересует?",
+    "давай иначе: что ты хочешь узнать?",
+]
+
+FALLBACK = NEUTRAL_LINES
+
+DEFAULT_CHIPS = ["как дела", "что ты умеешь", "пошути", "поговори со мной"]
+AFTER_JOKE_CHIPS = ["ещё шутку", "расскажи факт", "поговори со мной"]
+AFTER_FACT_CHIPS = ["ещё факт", "пошути", "что ты умеешь"]
+AFTER_EMPATHY_CHIPS = ["давай отвлечёмся", "включи музыку", "расскажи что-нибудь"]
+AFTER_COMMAND_CHIPS = ["спасибо", "что ты умеешь"]
 
 
 @dataclass
-class Reply:
-    """Ответ Nika: текст, быстрые кнопки и поручения интерфейсу."""
+class Mention:
+    """Что Nika запомнила о человеке в текущей фразе."""
 
-    text: str = ""
-    chips: List[str] = field(default_factory=list)
-    actions: List[Dict[str, Any]] = field(default_factory=list)
-    intent: str = ""
-    speak: bool = True
+    kind: str
+    value: str
 
 
-# ======================================================================
-#  Регулярки команд
-# ======================================================================
+_NAME_RE = re.compile(r"(?:меня\s+зовут|мо[её]\s+имя)\s+([a-zA-Zа-яА-ЯёЁ]{2,20})",
+                      re.IGNORECASE)
+_NAME_SHORT_RE = re.compile(r"\bя\s*[-—]\s*([a-zA-Zа-яА-ЯёЁ]{2,20})", re.IGNORECASE)
+_AGE_RE = re.compile(r"мне\s+(\d{1,2})\s*(?:год|лет|года)", re.IGNORECASE)
+_CITY_RE = re.compile(r"я\s+(?:живу\s+в|из|приехал\s+в|приехала\s+в)\s+([a-zA-Zа-яА-ЯёЁ\- ]{2,30})",
+                      re.IGNORECASE)
+_LIKE_RE = re.compile(r"я\s+(?:люблю|обожаю)\s+(.{2,60})", re.IGNORECASE)
+_PET_RE = re.compile(r"у\s+меня\s+(?:есть\s+)?(кот|кошка|кот[а-я]*|пёс|пес|собака|собаку|попугай|хомяк)",
+                     re.IGNORECASE)
+_JOB_RE = re.compile(r"я\s+(?:работаю|учусь)\s+(.{2,40})", re.IGNORECASE)
 
-CALL_RE = re.compile(
-    r"^(?:позвони|позвонить|набери|набрать|дозвонись|вызови|набери номер)\s*(.*)$")
-SMS_RE = re.compile(
-    r"^(?:напиши|отправь|скинь|напиши сообщение)\s+(?:смс|сообщение|эсэмэску|эсэмэс)\s*(.*)$")
-OPEN_RE = re.compile(
-    r"^(?:открой|открыть|запусти|запустить|вруби|врубай|включи|покажи|откройте)\s*(.*)$")
-MUSIC_RE = re.compile(
-    r"^(?:включи|поставь|вруби|запусти|включить)\s+(?:музыку|песню|трек|плейлист|радио)\s*(.*)$")
-VIDEO_RE = re.compile(
-    r"^(?:включи|поставь|вруби|включить)\s+(?:видео|фильм|кино|сериал|ролик)\s*(.*)$")
-TIMER_RE = re.compile(r"^(?:засеки|отсчитай|таймер|поставь таймер)\b\s*(.*)$")
-ALARM_RE = re.compile(r"^(?:будильник|разбуди|поставь будильник)\b\s*(.*)$")
-REMIND_RE = re.compile(r"^(?:напомни|напоминание)\b\s*(.*)$")
-SEARCH_RE = re.compile(
-    r"^(?:найди|поищи|загугли|погугли|вбей|ищи|поиск|найти)\s+(.*)$")
-WHAT_RE = re.compile(r"^(?:что такое|кто такой|кто такая|что значит|расскажи про|расскажи о)\s+(.*)$")
-WEATHER_RE = re.compile(r"^погод[а-я]*\s*(?:в|во|на|для|по)?\s*(.*)$")
-SETTINGS_RE = re.compile(r"^(?:открой|открыть)?\s*(?:настройки|параметры)\s*(.*)$")
-GREET_RE = re.compile(
-    r"^(?:привет|приветик|приветствую|здравствуй|здравствуйте|хай|ку|прив|салют|"
-    r"здорово|йо|добрый\s+(?:день|вечер)|доброе\s+утро|доброй\s+ночи|доброго\s+времени)"
-    r"(?:\b|$)")
-LEARN_RE = re.compile(r"^(?:научись|выучи)\s*[:\s]\s*(.+?)\s*(?:=|->|—|значит|это)\s*(.+)$")
-MEMORY_RE = re.compile(r"^запомни\s*[:\s]\s*(.+?)\s*[-—=]\s*(.+)$")
-NOTE_RE = re.compile(r"^(?:запомни|запиши|заметка)\s*[:\s]?\s*(.+)$")
-
-THANKS_RE = re.compile(r"\b(?:спасибо|благодарю|спс|пасиба|от души|thanks)\b")
-BYE_RE = re.compile(r"\b(?:пока|до свидания|до свид|бай|спокойной ночи|прощай)\b")
-LOVE_RE = re.compile(r"\b(?:люблю тебя|ты мне нравишься|ты классная|ты лучшая)\b")
-INSULT_RE = re.compile(r"\b(?:дура|тупая|глупая|отстой|ненавижу|бесишь|тупица)\b")
-PRAISE_RE = re.compile(r"\b(?:ты красивая|ты умная|ты классная|молодец|умница)\b")
-NAME_CALL_RE = re.compile(r"(?:тебя\s+зовут|тво[её]\s+имя)\s+([a-zA-Zа-яА-ЯёЁ]{2,20})")
-
-OWN_NAMES = {"ника", "nika", "ник", "nik", "никочка", "нике", "нику", "никой"}
-
-# Если человек ждёт уточнения («в каком городе?»), но вместо ответа явно
-# начинает новую команду — уточнение отменяем, команду выполняем.
-NEW_COMMAND_PREFIXES = (
-    "открой", "запусти", "включи", "позвони", "набери", "напиши смс",
-    "отправь сообщение", "засеки", "таймер", "будильник", "напомни",
-    "погода", "фонарик", "заряд", "громче", "тише", "без звука",
-    "какие сети", "какой пароль", "найди", "загугли", "поищи",
-    "что такое", "что ты умеешь", "сколько времени", "какое сегодня",
-    "мои заметки", "мои напоминания", "выключи",
-)
+_NOT_NAMES = {"зовут", "тебя", "меня", "это", "ника", "nika", "не", "егорыч"}
+_NOT_LIKES = {"тебя", "его", "её", "ее", "их", "это", "всё", "все", "тебе"}
 
 
-def format_phone(number):
-    digits = re.sub(r"\D", "", number or "")
-    if len(digits) == 11 and digits.startswith("7"):
-        return "+7 %s %s-%s-%s" % (digits[1:4], digits[4:7], digits[7:9], digits[9:11])
-    if len(digits) == 10:
-        return "+7 %s %s-%s-%s" % (digits[0:3], digits[3:6], digits[6:8], digits[8:10])
-    return number
+class Persona:
+    """Речь Nika. Логику не содержит — её ведёт engine."""
 
+    def __init__(self, store):
+        self.store = store
+        self.pick = Picker()
+        self.last_topic = None
+        self.last_kind = None
 
-def _strip_time_words(text):
-    """Убирает «через 20 минут» / «в 18:30» из текста напоминания."""
-    t = text or ""
-    t = re.sub(r"\bчерез\s+([0-9]+|[а-я]+)(?:\s+([0-9]+|[а-я]+))?\s*"
-               r"(минут[а-я]*|мин|час[а-я]*|ч|секунд[а-я]*|сек|с)\b", " ", t, flags=re.IGNORECASE)
-    t = re.sub(r"\b(?:в|к|на)\s+\d{1,2}(?:[:.]\d{2})?\s*(?:утра|дня|вечера|ночи)?\b", " ",
-               t, flags=re.IGNORECASE)
-    t = re.sub(r"\b(?:утра|дня|вечера|ночи)\b", " ", t, flags=re.IGNORECASE)
-    t = re.sub(r"\s+", " ", t).strip(" .,!?-—")
-    return t
+    @staticmethod
+    def part_of_day(hour):
+        if 5 <= hour < 12:
+            return "morning"
+        if 12 <= hour < 18:
+            return "day"
+        if 18 <= hour < 23:
+            return "evening"
+        return "night"
 
+    def greeting(self, hour=None):
+        hour = time.localtime().tm_hour if hour is None else hour
+        part = self.part_of_day(hour)
+        if part == "morning":
+            return self.pick(GREET_MORNING) + " "
+        if part == "day":
+            return self.pick(GREET_DAY) + " "
+        if part == "evening":
+            return self.pick(GREET_EVENING) + " "
+        return self.pick(GREET_NIGHT) + " "
 
-class Engine:
-    """Обрабатывает одну фразу человека и возвращает Reply."""
+    def idle_line(self, hour=None):
+        hour = time.localtime().tm_hour if hour is None else hour
+        part = self.part_of_day(hour)
+        if part == "morning":
+            return self.pick(IDLE_MORNING)
+        if part == "day":
+            return self.pick(IDLE_DAY)
+        if part == "evening":
+            return self.pick(IDLE_EVENING)
+        return self.pick(IDLE_NIGHT)
 
-    def __init__(self, bridge, store, persona=None, weather=None,
-                 now: Optional[Callable[[], float]] = None,
-                 status_cb: Optional[Callable[[str], None]] = None):
-        self.b = bridge
-        self.s = store
-        self.p = persona or Persona(store)
-        self.w = weather or Weather()
-        self.now = now or time.time
-        self.status_cb = status_cb
-        self.pending: Optional[Dict[str, Any]] = None
-        self.last_intent = ""
-        self.torch_on = False
-        self._deferred: List[Callable[[], Optional[Reply]]] = []
-        self._nested = False
-        self._question = False
-        self.session_started = self.now()
+    def absence(self, hours):
+        name = self.store.fact("name")
+        who = (", " + name) if name else ""
+        if hours < 3:
+            return self.pick(["с возвращением" + who + ")", "о, ты снова тут)"])
+        if hours < 10:
+            return self.pick([
+                "тебя не было несколько часов" + who + ". как ты?",
+                "о, вернулся) я уже начала скучать.",
+            ])
+        if hours < 30:
+            return self.pick([
+                "целый день тебя не было. что нового?",
+                "наконец-то) я тут одна с таймерами разговариваю.",
+            ])
+        return self.pick([
+            "сколько дней тебя не было! я думала, ты про меня забыл.",
+            "о, ты вернулся. я всё это время была тут.",
+        ])
 
-    # ------------------------------------------------------------------
-    #  Служебное
-    # ------------------------------------------------------------------
-    def _status(self, text):
-        if self.status_cb:
-            try:
-                self.status_cb(text)
-            except Exception:
-                pass
+    def night_line(self):
+        return self.pick(NIGHT_LINES)
 
-    def _defer(self, fn):
-        self._deferred.append(fn)
+    def topic(self):
+        packs = [t for t in TOPICS if t[0] != self.last_topic] or TOPICS
+        name, lines = random.choice(packs)
+        self.last_topic = name
+        return self.pick(lines)
 
-    def take_deferred(self):
-        items, self._deferred = self._deferred, []
-        return items
+    def how_are_you(self):
+        return self.pick(HOW_ARE_YOU)
 
-    def _request(self, permission, then):
-        """Просит право и откладывает действие до ответа системы."""
-        def done(ok):
-            if ok:
-                self._defer(then)
-            else:
-                self._defer(lambda: Reply(
-                    "без доступа не получится. включи его в настройках телефона — "
-                    "и скажи ещё раз."))
-        try:
-            res = self.b.request_permissions([permission], done)
-        except Exception:
-            return Reply("не смогла попросить доступ. включи его в настройках вручную.")
-        if res and not res.ok and "права" not in (res.message or ""):
-            return Reply(res.message or "не смогла получить доступ.")
-        return None
+    def joke(self):
+        self.last_kind = "joke"
+        return self.pick(JOKES)
+
+    def fact(self):
+        self.last_kind = "fact"
+        return self.pick(FACTS)
+
+    def advice(self):
+        self.last_kind = "advice"
+        return self.pick(ADVICE)
+
+    def again(self):
+        if self.last_kind == "joke":
+            return self.joke()
+        if self.last_kind == "fact":
+            return self.fact()
+        if self.last_kind == "advice":
+            return self.advice()
+        return self.topic()
 
     # ------------------------------------------------------------------
-    #  Главный вход
+    #  Запоминание фактов о человеке
     # ------------------------------------------------------------------
-    def respond(self, raw):
-        text = nlp.strip_punct(raw)
-        self._question = "?" in (raw or "")
+    def learn_facts(self, text):
+        found = []
         if not text:
-            return Reply(self.p.pick(["напиши что-нибудь)", "я тут, слушаю."]),
-                         chips=DEFAULT_CHIPS, intent="empty")
+            return found
 
-        self.s.touch()
+        m = _NAME_RE.search(text) or _NAME_SHORT_RE.search(text)
+        if m:
+            name = m.group(1).strip().capitalize()
+            low = name.lower()
+            if low not in _NOT_NAMES and len(name) >= 2:
+                if self.store.fact("name") != name:
+                    self.store.fact("name", name)
+                    found.append(Mention("name", name))
 
-        # ждём ответа на уточняющий вопрос
-        if self.pending:
-            reply = self._handle_pending(text)
-            if reply is not None:
-                answer = self._finish(reply, "pending")
-                self._remember(text, answer)
-                return answer
+        m = _AGE_RE.search(text)
+        if m:
+            age = int(m.group(1))
+            if 5 <= age <= 110:
+                self.store.fact("age", age)
+                found.append(Mention("age", str(age)))
 
-        clean = self._prepare(text)
-        t = nlp.fold(clean)
+        m = _CITY_RE.search(text)
+        if m:
+            city = m.group(1).strip(" .,!").capitalize()
+            if city and self.store.fact("city") != city:
+                self.store.fact("city", city)
+                self.store.set_pref("city", city)
+                found.append(Mention("city", city))
 
+        m = _LIKE_RE.search(text)
+        if m:
+            thing = m.group(1).strip(" .,!?")
+            if 2 <= len(thing) <= 60 and thing.lower() not in _NOT_LIKES:
+                self.store.add_like(thing)
+                found.append(Mention("like", thing))
+
+        m = _PET_RE.search(text)
+        if m:
+            pet = m.group(1).lower()
+            self.store.fact("pet", pet)
+            found.append(Mention("pet", pet))
+
+        m = _JOB_RE.search(text)
+        if m:
+            job = m.group(1).strip(" .,!")
+            if 2 <= len(job) <= 40:
+                self.store.fact("job", job)
+                found.append(Mention("job", job))
+
+        return found
+
+    def fact_ack(self, found):
+        if not found:
+            return ""
+        parts = []
+        for item in found:
+            if item.kind == "name":
+                parts.append("приятно познакомиться, %s" % item.value)
+            elif item.kind == "age":
+                parts.append("запомнила: тебе %s" % item.value)
+            elif item.kind == "city":
+                parts.append("значит, ты из %s" % item.value)
+            elif item.kind == "like":
+                parts.append("запомнила: любишь %s" % item.value)
+            elif item.kind == "pet":
+                parts.append("о, у тебя %s" % item.value)
+            elif item.kind == "job":
+                parts.append("запомнила: %s" % item.value)
+        return "; ".join(parts) + ")"
+
+    def facts_summary(self):
+        facts = self.store.get("facts", {}) or {}
+        bits = []
+        if facts.get("name"):
+            bits.append("тебя зовут %s" % facts["name"])
+        if facts.get("age"):
+            bits.append("тебе %s" % facts["age"])
+        if facts.get("city"):
+            bits.append("ты из %s" % facts["city"])
+        if facts.get("job"):
+            bits.append("ты %s" % facts["job"])
+        if facts.get("pet"):
+            bits.append("у тебя есть %s" % facts["pet"])
+        likes = facts.get("likes") or []
+        if likes:
+            bits.append("любишь " + ", ".join(likes[-3:]))
+        if not bits:
+            return self.pick([
+                "пока почти ничего) расскажи о себе — и я запомню.",
+                "я пока знаю только то, что ты любишь со мной болтать)",
+            ])
+        return "вот что я помню: " + "; ".join(bits) + "."
+
+    # ------------------------------------------------------------------
+    #  ПУНКТ 5: живой разговор, всегда есть нейтральная фраза
+    # ------------------------------------------------------------------
+    def smalltalk(self, text):
+        t = nlp.fold(text).strip(" .,!?")
         if not t:
-            return Reply("напиши что-нибудь)", chips=DEFAULT_CHIPS)
-
-        # «тебя зовут Петя» — она немного обижается
-        name_reply = self._name_guard(t)
-        if name_reply:
-            answer = self._finish(name_reply, "name")
-            self._remember(text, answer)
-            return answer
-
-        parts = nlp.split_multi(clean)
-        if len(parts) > 1:
-            self._nested = True
-            texts = []
-            try:
-                for part in parts:
-                    sub = self.respond(part)
-                    if sub.text and sub.text not in texts:
-                        texts.append(sub.text)
-            finally:
-                self._nested = False
-            if texts:
-                answer = Reply(" ".join(texts), chips=AFTER_COMMAND_CHIPS, intent="multi")
-                self._remember(text, answer)
-                return answer
-
-        answer = self._respond_one(clean)
-        self._remember(text, answer)
-        return answer
-
-    def _remember(self, user_text, reply):
-        if self._nested or not reply:
-            return
-        try:
-            self.s.push_dialog(user_text, reply.text)
-        except Exception:
-            pass
-
-    def _respond_one(self, clean):
-        t = nlp.fold(clean)
-        handlers = (
-            self._h_learn,
-            self._h_meta,
-            self._h_timer,
-            self._h_alarm,
-            self._h_reminder,
-            self._h_call,
-            self._h_sms,
-            self._h_settings,
-            self._h_torch,
-            self._h_volume,
-            self._h_battery,
-            self._h_wifi,
-            self._h_weather,
-            self._h_music,
-            self._h_video,
-            self._h_time,
-            self._h_date,
-            self._h_identity,
-            self._h_help,
-            self._h_social,
-            self._h_facts,
-            self._h_memory,
-            self._h_notes,
-            self._h_open,
-            self._h_search,
-        )
-        for handler in handlers:
-            try:
-                reply = handler(clean, t)
-            except Exception as exc:  # один сломанный обработчик не роняет всё
-                print("[Nika/engine] %s: %s" % (handler.__name__, exc))
-                continue
-            if reply is not None:
-                return self._finish(reply, handler.__name__.replace("_h_", ""))
-        return self._finish(self._fallback(clean, t), "fallback")
-
-    # ------------------------------------------------------------------
-    #  Подготовка фразы
-    # ------------------------------------------------------------------
-    def _prepare(self, text):
-        clean = self._strip_address(text)
-        clean = nlp.fix_typos(clean)
-        clean = self._apply_learned(clean)
-        return clean
-
-    def _strip_address(self, text):
-        names = "|".join(re.escape(n) for n in OWN_NAMES)
-        return re.sub(r"^(?:%s)[\s,!.]+" % names, "", text or "",
-                      flags=re.IGNORECASE).strip() or text
-
-    def _apply_learned(self, text):
-        learned = self.s.get("learned", {}) or {}
-        low = (text or "").lower()
-        best = None
-        for key in learned:
-            if low.startswith(key.lower()) and len(key) > 3:
-                if best is None or len(key) > len(best):
-                    best = key
-        if best:
-            rest = text[len(best):].strip()
-            return (learned[best] + " " + rest).strip()
-        return text
-
-    def _name_guard(self, t):
-        m = NAME_CALL_RE.search(t)
-        if not m:
-            return None
-        name = m.group(1).strip().lower()
-        if name in OWN_NAMES:
-            return None
-        if len(name) < 3:
-            return None
-        return Reply(self.p.pick([
-            "я вообще-то Nika) но можно просто Ника.",
-            "это не я. я Nika, если что)",
-            "не-а, меня зовут Nika. запомни, пожалуйста)",
-        ]), chips=DEFAULT_CHIPS)
-
-    def _finish(self, reply, intent=""):
-        if reply is None:
-            reply = Reply("")
-        if isinstance(reply, str):
-            reply = Reply(reply)
-        reply.text = (reply.text or "").strip()
-        if not reply.chips:
-            reply.chips = DEFAULT_CHIPS
-        reply.intent = reply.intent or intent
-        self.last_intent = reply.intent
-        return reply
-
-    # ------------------------------------------------------------------
-    #  Ожидание уточнения
-    # ------------------------------------------------------------------
-    def _handle_pending(self, text):
-        pending = self.pending
-        kind = pending.get("kind")
-        t = nlp.fold(text)
-        value = nlp.strip_punct(text)
-
-        # вместо ответа на уточнение человек начал новую команду
-        if t.startswith(NEW_COMMAND_PREFIXES):
-            self.pending = None
-            return None
-
-        def ask_again(prompt, chips=None):
-            return Reply(prompt, chips=chips or DEFAULT_CHIPS)
-
-        # ---- выбор контакта ----
-        if kind == "contact_choice":
-            options = pending.get("options") or []
-            chosen = None
-            digits = re.findall(r"\d", t)
-            if len(digits) == 1 and 1 <= int(digits[0]) <= len(options):
-                chosen = options[int(digits[0]) - 1]
-            if chosen is None and len(digits) >= 4:
-                tail = "".join(digits)[-10:]
-                for option in options:
-                    if re.sub(r"\D", "", option["number"])[-10:] == tail:
-                        chosen = option
-                        break
-            if chosen is None:
-                for option in options:
-                    if nlp.fold(option.get("label") or option["name"]) == t:
-                        chosen = option
-                        break
-            if chosen is None:
-                words = set(nlp.tokens(t))
-                for option in options:
-                    name_words = set(nlp.tokens(option["name"]))
-                    if words & name_words or nlp.stem_ru(option["name"]) == nlp.stem_ru(value):
-                        chosen = option
-                        break
-            if chosen is None:
-                best, score = nlp.fuzzy_best(value, [(o["name"], [o["name"]]) for o in options])
-                if best and score >= 0.7:
-                    for option in options:
-                        if option["name"] == best:
-                            chosen = option
-                            break
-            if chosen is None:
-                names = ", ".join(o.get("label") or o["name"] for o in options[:6])
-                return ask_again("не поняла, кому. вот варианты: %s" % names,
-                                 chips=[o.get("label") or o["name"] for o in options[:6]])
-            self.pending = None
-            return self._dial_number(chosen["number"], chosen["name"])
-
-        # ---- кому позвонить ----
-        if kind == "call_name":
-            self.pending = None
-            return self._dial_target(value)
-
-        # ---- текст смс ----
-        if kind == "sms_text":
-            number = pending.get("number")
-            name = pending.get("name") or ""
-            self.pending = None
-            res = self.b.send_sms(number, value)
-            if res.ok:
-                return Reply("открыла сообщение%s — текст уже вставлен." %
-                             ((" для «" + name + "»") if name else ""),
-                             chips=AFTER_COMMAND_CHIPS)
-            return Reply(res.message or "не смогла открыть сообщения.",
-                         chips=AFTER_COMMAND_CHIPS)
-
-        # ---- город для погоды ----
-        if kind == "weather_city":
-            self.pending = None
-            return self._weather_reply(value)
-
-        # ---- сеть для wi-fi ----
-        if kind == "wifi_ssid":
-            self.pending = None
-            return self._wifi_password_reply(value)
-
-        # ---- длительность таймера ----
-        if kind == "timer_duration":
-            seconds = nlp.parse_duration(text)
-            if not seconds:
-                return ask_again("на сколько? можно цифрой: 5, 10, 25 минут.",
-                                 chips=["5 минут", "10 минут", "25 минут"])
-            self.pending = None
-            return self._start_timer(seconds)
-
-        # ---- время будильника ----
-        if kind == "alarm_time":
-            clock = nlp.parse_clock(text)
-            if not clock:
-                return ask_again("на какое время? например, 7:30.",
-                                 chips=["7:00", "8:00", "9:00"])
-            self.pending = None
-            return self._set_alarm(clock[0], clock[1])
-
-        # ---- время напоминания ----
-        if kind == "reminder_time":
-            seconds = nlp.parse_duration(text)
-            clock = nlp.parse_clock(text) if not seconds else None
-            if not seconds and not clock:
-                return ask_again("через сколько напомнить?",
-                                 chips=["через 10 минут", "через час", "в 18:00"])
-            self.pending = None
-            return self._create_reminder(pending.get("text", ""), seconds, clock)
-
-        self.pending = None
-        return None
-
-    # ------------------------------------------------------------------
-    #  Факты и самообучение
-    # ------------------------------------------------------------------
-    def _h_learn(self, clean, t):
-        m = LEARN_RE.match(clean)
-        if not m:
-            return None
-        key = m.group(1).strip().lower()
-        value = m.group(2).strip()
-        if not key or not value:
-            return None
-        learned = self.s.get("learned", {}) or {}
-        learned[key] = value
-        self.s.set("learned", learned)
-        return Reply(self.p.pick([
-            "запомнила: «%s» = «%s»." % (key, value),
-            "ок, теперь «%s» буду понимать как «%s»." % (key, value),
-            "выучила новую фразу)",
-        ]), chips=["проверь", "что ты не знаешь"])
-
-    def _h_meta(self, clean, t):
-        if any(w in t for w in ("что ты не знаешь", "чему надо научить", "чего не поняла")):
-            unknown = self.s.get("unknown", []) or []
-            if not unknown:
-                return Reply("пока всё понимаю) нечего учить.")
-            top = unknown[-8:][::-1]
-            return Reply("вот что я недавно не поняла:\n" +
-                         "\n".join("• %s" % p for p in top) +
-                         "\nскажи «научись: <фраза> = <что делать>», и я запомню.",
-                         chips=["забудь непонимание"])
-        if any(w in t for w in ("забудь непонимание", "очисти непонимание",
-                                "забудь что не знаешь")):
-            self.s.set("unknown", [])
-            return Reply("ок, очистила список непониманий.")
-        if any(w in t for w in ("что ты обо мне помнишь", "что помнишь обо мне",
-                                "что ты знаешь обо мне")):
-            return Reply(self.p.facts_summary(), chips=["запомни, что ", "мои заметки"])
-        if any(w in t for w in ("забудь обо мне", "удали мои данные", "сотри память",
-                                "забудь всё")):
-            self.s.set("facts", {})
-            self.s.set("dialog", [])
-            self.s.set("notes", [])
-            self.s.set("memory", {})
-            self.s.save()
-            return Reply("готово, стёрла всё, что помнила о тебе. начнём с чистого листа.",
-                         chips=DEFAULT_CHIPS)
-        return None
-
-    def _h_facts(self, clean, t):
-        if any(w in t for w in ("как меня зовут", "моё имя", "мое имя", "кто я")):
-            name = self.s.fact("name")
-            if not name:
-                return Reply("ты мне ещё не сказал) скажи «меня зовут ...» — и запомню.",
-                             chips=["меня зовут "])
-            return Reply(self.p.pick([
-                "тебя зовут %s. я помню)" % name,
-                "%s, конечно. такое не забывается." % name,
-            ]))
-        if any(w in t for w in ("сколько мне лет", "мой возраст")):
-            age = self.s.fact("age")
-            if not age:
-                return Reply("не знаю) скажи «мне N лет», и я запомню.")
-            return Reply("тебе %s. записала однажды и помню." % age)
-
-        if not any(w in t for w in ("меня зовут", "мне ", "я живу", "я из", "я люблю",
-                                    "я обожаю", "у меня есть", "я работаю", "я учусь")):
-            return None
-        # не перебиваем просьбы и команды
-        if any(t.startswith(v) for v in ("позвони", "открой", "найди", "включи",
-                                         "напомни", "засеки", "будильник", "погода")):
-            return None
-        found = self.p.learn_facts(clean)
-        ack = self.p.fact_ack(found)
-        if not ack:
-            likes = (self.s.get("facts", {}) or {}).get("likes") or []
-            if ("люблю" in t or "обожаю" in t) and likes:
-                return Reply("запомнила: любишь %s. а что ещё?" % likes[-1],
-                             chips=["что ты обо мне помнишь"])
-            if "меня зовут" in t and self.s.fact("name"):
-                return Reply("мы уже знакомы) ты %s." % self.s.fact("name"),
-                             chips=["что ты обо мне помнишь"])
-            ack = self.p.pick(["запомнила)", "ок, буду знать)"])
-        return Reply(ack + " а что ещё расскажешь?", chips=["что ты обо мне помнишь"])
-
-    # ------------------------------------------------------------------
-    #  Время: таймер, будильник, напоминание
-    # ------------------------------------------------------------------
-    def _h_timer(self, clean, t):
-        if not TIMER_RE.match(t):
-            return None
-        if "будильник" in t:
-            return None
-        rest = TIMER_RE.match(t).group(1)
-        seconds = nlp.parse_duration(rest or t)
-        if not seconds:
-            self.pending = {"kind": "timer_duration"}
-            return Reply("на сколько засечь?", chips=["5 минут", "10 минут", "25 минут"])
-        return self._start_timer(seconds)
-
-    def _start_timer(self, seconds):
-        label = nlp.human_duration(seconds)
-        self._status("засекаю %s" % label)
-        return Reply(
-            self.p.pick([
-                "засекла %s. цифры будут сверху." % label,
-                "таймер на %s пошёл. я рядом." % label,
-                "ок, %s. как выйдет время — скажу." % label,
-            ]),
-            actions=[{"type": "timer", "seconds": seconds, "label": label}],
-            chips=["останови таймер", "спасибо"],
-        )
-
-    def _h_alarm(self, clean, t):
-        m = ALARM_RE.match(t)
-        if not m:
-            return None
-        rest = m.group(1)
-        clock = nlp.parse_clock(rest or t)
-        if not clock:
-            self.pending = {"kind": "alarm_time"}
-            return Reply("на какое время поставить будильник?", chips=["7:00", "8:00", "9:00"])
-        return self._set_alarm(clock[0], clock[1])
-
-    def _set_alarm(self, hour, minute):
-        label = "Nika"
-        res = self.b.set_alarm(hour, minute, label)
-        clock = nlp.human_clock(hour, minute)
-        if res.ok:
-            return Reply(self.p.pick([
-                "будильник на %s. не проспи)" % clock,
-                "поставила на %s. если что — поправь в часах." % clock,
-            ]), chips=["спасибо", "заряд"])
-        return Reply(res.message or "не смогла открыть будильник.",
-                     chips=["открой часы"])
-
-    def _h_reminder(self, clean, t):
-        m = REMIND_RE.match(t)
-        if not m:
-            return None
-        rest = m.group(1).strip()
-        if not rest:
-            self.pending = {"kind": "reminder_time", "text": ""}
-            return Reply("о чём напомнить и когда?", chips=["через 10 минут", "через час"])
-        seconds = nlp.parse_duration(rest)
-        clock = nlp.parse_clock(rest) if not seconds else None
-        text = _strip_time_words(rest)
-        if not seconds and not clock:
-            self.pending = {"kind": "reminder_time", "text": text or rest}
-            return Reply("когда напомнить про «%s»?" % (text or rest),
-                         chips=["через 10 минут", "через час", "в 18:00"])
-        return self._create_reminder(text, seconds, clock)
-
-    def _create_reminder(self, text, seconds, clock):
-        now = self.now()
-        if seconds:
-            at = now + seconds
-        else:
-            hour, minute = clock
-            stamp = time.localtime(now)
-            at = time.mktime((stamp.tm_year, stamp.tm_mon, stamp.tm_mday,
-                              hour, minute, 0, 0, 0, -1))
-            if at <= now:
-                at += 86400
-        text = text or "напоминание"
-        self.s.add_reminder(at, text)
-        self.s.save()
-        when = time.strftime("%H:%M", time.localtime(at))
-        if at - now > 20 * 3600:
-            when = time.strftime("%d.%m в %H:%M", time.localtime(at))
-        return Reply(self.p.pick([
-            "напомню в %s: %s." % (when, text),
-            "записала. в %s напомню про «%s»." % (when, text),
-        ]), actions=[{"type": "reminder", "at": at, "text": text}],
-            chips=["мои напоминания", "спасибо"])
-
-    # ------------------------------------------------------------------
-    #  Звонки
-    # ------------------------------------------------------------------
-    def _h_call(self, clean, t):
-        # режим звонка: сразу набирать или только открывать номер
-        if any(w in t for w in ("звони сразу", "сразу звони", "сразу набирай",
-                                "звонить сразу", "набирай сразу")):
-            self.s.set_pref("instant_call", True)
-            if self.b.is_android and not self.b.has_permission("CALL_PHONE"):
-                self._request("CALL_PHONE", lambda: None)
-            return Reply("хорошо, буду сразу набирать. если что — скажи "
-                         "«показывай номер».", chips=["позвони маме", "спасибо"])
-        if any(w in t for w in ("показывай номер", "не звони сразу", "не набирай сразу",
-                                "спрашивай перед звонком", "только набирай")):
-            self.s.set_pref("instant_call", False)
-            return Reply("ок, буду открывать номер — нажмёшь зелёную кнопку сам.",
-                         chips=["спасибо"])
-
-        m = CALL_RE.match(t)
-        if not m:
-            return None
-        target = nlp.strip_punct(m.group(1))
-        if not target:
-            self.pending = {"kind": "call_name"}
-            return Reply("кому позвонить?", chips=self._contact_chips())
-        return self._dial_target(target)
-
-    def _contact_chips(self, limit=4):
-        try:
-            contacts = self.b.contacts()
-        except Exception:
-            contacts = []
-        names = []
-        for contact in contacts:
-            if contact.name and contact.name not in names:
-                names.append(contact.name)
-            if len(names) >= limit:
-                break
-        if names:
-            return names
-        return ["маме", "папе", "112"]
-
-    def _dial_target(self, target):
-        target = nlp.strip_punct(target)
-        t = nlp.fold(target)
-
-        # экстренные службы
-        emergency = catalog.emergency_number(t)
-        if emergency:
-            return self._dial_number(emergency, "экстренную службу")
-
-        digits = re.findall(r"\d", target)
-        letters = re.findall(r"[a-zа-я]", t)
-        if len(digits) >= 3 and not letters:
-            number = "".join(digits)
-            if len(number) > 4:
-                number = nlp.normalize_phone(number) or ("+" + number)
-            return self._dial_number(number, "")
-
-        if self.b.can_contacts and not self.b.has_permission("READ_CONTACTS"):
-            failure = self._request("READ_CONTACTS", lambda: self._dial_target(target))
-            if failure:
-                return failure
-            return Reply("сейчас спрошу доступ к контактам — разреши, и я наберу "
-                         "«%s»." % target, chips=DEFAULT_CHIPS)
-
-        matches = self._match_contacts(target)
-        if not matches:
-            contacts = self.b.contacts()
-            if not contacts:
-                return Reply("в контактах пусто. назови номер — наберу.",
-                             chips=["позвони 112"])
-            return Reply("в контактах не нашла «%s». под каким именем он записан?" % target,
-                         chips=[c.name for c in contacts[:4]])
-        if len(matches) == 1:
-            contact = matches[0]
-            return self._dial_number(contact.number, contact.name)
-
-        options = []
-        for contact in matches[:6]:
-            label = contact.name
-            twins = sum(1 for other in matches
-                        if nlp.fold(other.name) == nlp.fold(contact.name))
-            if twins > 1:
-                label = "%s · %s" % (contact.name, format_phone(contact.number))
-            options.append({"name": contact.name, "number": contact.number,
-                            "label": label})
-        self.pending = {"kind": "contact_choice", "options": options}
-        names = ", ".join(o["label"] for o in options)
-        return Reply("нашла несколько: %s. кому звонить?" % names,
-                     chips=[o["label"] for o in options])
-
-    def _match_contacts(self, query):
-        try:
-            contacts = self.b.contacts()
-        except Exception:
-            contacts = []
-        if not contacts:
-            return []
-        q = nlp.fold(query)
-        q = re.sub(r"^(?:в|на|к|по)\s+", "", q)
-        if not q:
-            return []
-        stem_q = nlp.stem_ru(q)
-        scored = []
-        for contact in contacts:
-            name = nlp.fold(contact.name)
-            if not name:
-                continue
-            stem_name = nlp.stem_ru(name)
-            score = 0.0
-            if name == q:
-                score = 1.0
-            elif stem_name == stem_q:
-                score = 0.96
-            elif name.startswith(q) or q.startswith(name):
-                score = 0.86
-            elif stem_name.startswith(stem_q) or stem_q.startswith(stem_name):
-                score = 0.8
-            elif q in name:
-                score = 0.72
-            elif nlp.stem_ru(name.split()[0]) == stem_q:
-                score = 0.78
-            else:
-                score = nlp.ratio(name, q) * 0.65
-            if score >= 0.6:
-                scored.append((score, contact))
-        if not scored:
-            return []
-        scored.sort(key=lambda item: item[0], reverse=True)
-        best = scored[0][0]
-        result = []
-        seen = set()
-        for score, contact in scored:
-            if score < best - 0.12:
-                continue
-            key = re.sub(r"\D", "", contact.number)[-10:]
-            if key in seen:
-                continue
-            seen.add(key)
-            result.append(contact)
-        return result[:6]
-
-    def _dial_number(self, number, name=""):
-        if not number:
-            return Reply("не поняла номер.")
-        direct = bool(self.s.pref("instant_call", False))
-        res = self.b.dial(number, direct=direct)
-        pretty = format_phone(number)
-        if not res.ok:
-            return Reply(res.message or "не смогла набрать.",
-                         chips=["позвони 112", "что ты умеешь"])
-        if res.message == "звоню":
-            return Reply("звоню%s — %s." % ((" " + name) if name else "", pretty),
-                         chips=["спасибо"])
-        if name:
-            return Reply(self.p.pick([
-                "набираю «%s» — %s. нажми зелёную кнопку)" % (name, pretty),
-                "готово: «%s», %s. осталось позвонить." % (name, pretty),
-            ]), chips=["спасибо"])
-        return Reply("набрала %s. жми вызов." % pretty, chips=["спасибо"])
-
-    # ------------------------------------------------------------------
-    #  Смс
-    # ------------------------------------------------------------------
-    def _h_sms(self, clean, t):
-        m = SMS_RE.match(t)
-        if not m:
-            return None
-        rest = nlp.strip_punct(m.group(1))
-        if not rest:
-            self.pending = {"kind": "call_name"}
-            return Reply("кому написать?", chips=self._contact_chips())
-
-        if self.b.can_contacts and not self.b.has_permission("READ_CONTACTS"):
-            failure = self._request("READ_CONTACTS", lambda: self._h_sms(clean, t))
-            if failure:
-                return failure
-            return Reply("сейчас спрошу доступ к контактам — разреши, и я сразу "
-                         "открою сообщение.", chips=DEFAULT_CHIPS)
-
-        contact, text = self._split_contact_text(rest)
-        if contact is None:
-            return Reply("не нашла такого контакта. назови имя или номер.",
-                         chips=self._contact_chips())
-        if not text:
-            self.pending = {"kind": "sms_text", "number": contact.number,
-                            "name": contact.name}
-            return Reply("что написать %s?" % contact.name)
-
-        res = self.b.send_sms(contact.number, text)
-        if res.ok:
-            return Reply("открыла сообщение для «%s» — текст уже вставлен." % contact.name,
-                         chips=AFTER_COMMAND_CHIPS)
-        return Reply(res.message or "не смогла открыть сообщения.",
-                     chips=AFTER_COMMAND_CHIPS)
-
-    def _split_contact_text(self, rest):
-        """«маме я скоро буду» -> (контакт, «я скоро буду»)."""
-        divider = re.split(r"\s*[:,—]\s*", rest, maxsplit=1)
-        if len(divider) == 2:
-            contact_part, text = divider[0], divider[1]
-            contact = self._resolve_one_contact(contact_part)
-            if contact:
-                return contact, text
-
-        words = rest.split()
-        for count in range(1, min(4, len(words)) + 1):
-            candidate = " ".join(words[:count])
-            contact = self._resolve_one_contact(candidate)
-            if contact:
-                return contact, " ".join(words[count:])
-
-        matches = self._match_contacts(rest)
-        if matches:
-            return matches[0], ""
-        return None, ""
-
-    def _resolve_one_contact(self, text):
-        matches = self._match_contacts(text)
-        if len(matches) == 1:
-            return matches[0]
-        if matches:
-            return matches[0]
-        return None
-
-    # ------------------------------------------------------------------
-    #  Настройки, фонарик, звук, заряд
-    # ------------------------------------------------------------------
-    def _h_settings(self, clean, t):
-        m = SETTINGS_RE.match(t)
-        if not m:
-            return None
-        tail = m.group(1)
-        page = ""
-        if "вайф" in tail or "wi-fi" in tail or "wi fi" in tail or "wifi" in tail or "сет" in tail:
-            page = "wifi"
-        elif "приложен" in tail:
-            page = "apps"
-        elif "блютуз" in tail or "bluetooth" in tail:
-            page = "bluetooth"
-        elif "звук" in tail:
-            page = "sound"
-        elif "экран" in tail or "дисплей" in tail:
-            page = "display"
-        elif "батаре" in tail or "заряд" in tail:
-            page = "battery"
-        elif "геолокац" in tail or "местополож" in tail:
-            page = "location"
-
-        res = self.b.open_settings(page)
-        if not res.ok:
-            return Reply("не смогла открыть настройки: %s" % (res.message or "нет доступа"),
-                         chips=["что ты умеешь"])
-        if page == "wifi":
-            return Reply("открыла настройки wi-fi. тут можно посмотреть сеть и "
-                         "поделиться паролем через QR.", chips=["какой пароль от вайфая"])
-        return Reply("открыла настройки.", chips=AFTER_COMMAND_CHIPS)
-
-    def _h_torch(self, clean, t):
-        if not any(w in t for w in ("фонарик", "фонарь", "вспышк", "подсветк")):
-            return None
-        if any(w in t for w in ("выключи", "погаси", "отключи", "не надо")):
-            res = self.b.torch(False)
-            self.torch_on = False
-            return Reply("выключила фонарик." if res.ok else
-                         (res.message or "не получилось выключить."),
-                         chips=["фонарик"])
-        res = self.b.torch(True)
-        self.torch_on = True
-        if res.ok:
-            return Reply(self.p.pick(["включила фонарик.", "фонарик горит)"]),
-                         chips=["выключи фонарик"])
-        return Reply(res.message or "фонарик не поддался.", chips=DEFAULT_CHIPS)
-
-    def _h_volume(self, clean, t):
-        direction = None
-        if any(w in t for w in ("громче", "прибавь", "погромче", "увеличь звук",
-                                "сделай громче")):
-            direction = "up"
-        elif any(w in t for w in ("тише", "убавь", "потише", "уменьши звук",
-                                  "сделай тише")):
-            direction = "down"
-        elif any(w in t for w in ("без звука", "выключи звук", "на беззвучный",
-                                  "беззвучн", "mute")):
-            direction = "mute"
-        elif any(w in t for w in ("на полную", "максимум звука", "громкость на максимум")):
-            direction = "max"
-        if not direction:
-            return None
-        res = self.b.volume(direction)
-        if not res.ok:
-            return Reply(res.message or "не смогла изменить звук.", chips=DEFAULT_CHIPS)
-        if direction == "mute":
-            return Reply("звук выключен.", chips=["громче"])
-        return Reply("теперь %s." % res.message, chips=["громче", "тише"])
-
-    def _h_battery(self, clean, t):
-        if not any(w in t for w in ("заряд", "батаре", "аккумулятор", "сколько процентов")):
-            return None
-        self._status("смотрю заряд")
-        data = self.b.battery()
-        if not data or "percent" not in data:
-            return Reply("не получилось узнать заряд — телефон не отдаёт данные.",
-                         chips=DEFAULT_CHIPS)
-        percent = int(data.get("percent", 0))
-        charging = bool(data.get("charging"))
-        if charging:
-            return Reply("заряд %d%%, и он заряжается. хорошо." % percent,
-                         chips=["спасибо"])
-        if percent <= 15:
-            return Reply(self.p.pick([
-                "заряд %d%%. пора к розетке, а то я волнуюсь." % percent,
-                "всего %d%%. найди зарядку, пожалуйста." % percent,
-            ]), chips=["фонарик", "спасибо"])
-        if percent <= 40:
-            return Reply("заряд %d%%. ещё живём, но зарядку лучше не терять." % percent,
-                         chips=["спасибо"])
-        return Reply("заряд %d%%. всё в порядке." % percent, chips=["спасибо"])
-
-    # ------------------------------------------------------------------
-    #  Wi-Fi
-    # ------------------------------------------------------------------
-    def _h_wifi(self, clean, t):
-        has_wifi_word = any(w in t for w in ("вайфай", "вай-фай", "вай фай", "wifi",
-                                             "wi-fi", "wi fi", "вайфа"))
-        wants_password = ("парол" in t or bool(re.search(r"(?<![а-яa-z])ключ", t)))
-        wants_saved = any(w in t for w in ("какие сети", "сохраненн", "сохранённ",
-                                           "мои сети", "список сетей", "все сети",
-                                           "всех сетей", "какие вайфаи"))
-        if wants_saved and (has_wifi_word or "сет" in t):
-            return self._wifi_list_reply()
-        if wants_password and (has_wifi_word or "сет" in t):
-            ssid = self._extract_ssid(clean) or ""
-            return self._wifi_password_reply(ssid)
-        if has_wifi_word and any(w in t for w in ("включи", "выключи", "переключи",
-                                                  "отключи", "вруби", "подключи")):
-            self.b.open_settings("wifi")
-            return Reply("переключать wi-fi приложениям Android запрещает, поэтому "
-                         "открыла настройки — тут один переключатель.",
-                         chips=["какой пароль от вайфая"])
-        if has_wifi_word:
-            return self._wifi_info_reply()
-        return None
-
-    @staticmethod
-    def _extract_ssid(clean):
-        pattern = (r'(?:сеть|сети|сетью|вай[\s\-]?фа\w*|wi[\s\-]?fi|wifi)'
-                   r'\s+["«]?([^\s"»,.!?]+)')
-        m = re.search(pattern, clean, re.IGNORECASE)
-        if not m:
-            return ""
-        value = m.group(1).strip()
-        stop = {"от", "для", "этой", "этого", "моей", "моего", "текущей", "сейчас",
-                "пожалуйста", "вайфая", "вай-фая", "wifi", "wi-fi", "сеть"}
-        if value.lower() in stop or value.lower().startswith("вайф"):
-            return ""
-        return value
-
-    def _wifi_info_reply(self):
-        if not self.b.is_android:
-            info = self.b.wifi_info() or {}
-            if info.get("ssid"):
-                return Reply("ты подключён к сети «%s»." % info["ssid"],
-                             chips=["какой пароль от вайфая"])
-            return Reply("wi-fi смотрю только на телефоне. тут могу открыть настройки "
-                         "сети, если хочешь.", chips=DEFAULT_CHIPS)
-        self._status("смотрю сеть")
-        info = self.b.wifi_info() or {}
-        ssid = info.get("ssid")
-        if not ssid:
-            return Reply(
-                "не вижу, к какой сети подключён. либо wi-fi выключен, либо Android "
-                "не даёт имя сети без доступа к геолокации.\n"
-                "включи wi-fi — и спроси ещё раз.", chips=["открой настройки вайфая"])
-        lines = ["ты в сети «%s»." % ssid]
-        rssi = info.get("rssi")
-        if isinstance(rssi, int):
-            if rssi >= -55:
-                lines.append("сигнал отличный.")
-            elif rssi >= -70:
-                lines.append("сигнал нормальный.")
-            else:
-                lines.append("сигнал слабоват — подойди к роутеру.")
-        if info.get("ip"):
-            lines.append("ip %s." % info["ip"])
-        lines.append("пароль просто так не покажу — Android его прячет. спроси "
-                     "«какой пароль от вайфая», и я попробую.")
-        return Reply("\n".join(lines),
-                     chips=["какой пароль от вайфая", "какие сети"])
-
-    def _wifi_list_reply(self):
-        self._status("читаю сохранённые сети")
-        names = self.b.wifi_saved() or []
-        info = self.b.wifi_info() or {}
-        if not names:
-            if not self.b.is_android:
-                return Reply("на компьютере не нашла сохранённых сетей.",
-                             chips=DEFAULT_CHIPS)
-            return Reply(
-                "список сохранённых сетей Android показывает только системным "
-                "приложениям. но текущую сеть вижу: %s." %
-                (info.get("ssid") or "не вижу"),
-                chips=["какой пароль от вайфая"])
-        current = info.get("ssid")
-        lines = ["сохранённые сети:"]
-        for name in names[:12]:
-            mark = " (сейчас)" if current and name.lower() == current.lower() else ""
-            lines.append("• %s%s" % (name, mark))
-        lines.append("пароли к ним без root не отдаются. про конкретную сеть спроси "
-                     "«пароль от вайфая <название>».")
-        return Reply("\n".join(lines),
-                     chips=["какой пароль от вайфая"])
-
-    def _wifi_password_reply(self, ssid):
-        ssid = (ssid or "").strip().strip('"')
-        self._status("ищу пароль")
-        if not self.b.is_android:
-            info = self.b.wifi_info() or {}
-            ssid = ssid or info.get("ssid", "")
-            if not ssid:
-                return Reply("не вижу, к какой сети ты подключён.",
-                             chips=["какие сети"])
-        if not ssid:
-            info = self.b.wifi_info() or {}
-            ssid = info.get("ssid") or ""
-            if not ssid:
-                names = self.b.wifi_saved() or []
-                if len(names) == 1:
-                    ssid = names[0]
-                elif names:
-                    self.pending = {"kind": "wifi_ssid"}
-                    return Reply("не вижу текущую сеть. скажи название: %s" %
-                                 ", ".join(names[:8]),
-                                 chips=names[:6])
-                else:
-                    return Reply(
-                        "не вижу ни одной сети. включи wi-fi и спроси ещё раз.",
-                        chips=["открой настройки вайфая"])
-
-        password, how = self.b.wifi_password(ssid)
-        if password:
-            note = "" if how == "root" else ""
-            return Reply("сеть «%s»\nпароль: %s%s" % (ssid, password, note),
-                         chips=["какие сети", "спасибо"])
-        if how == "" and self.b.is_android:
-            return Reply(
-                "сеть «%s» сохранена, но Android не отдаёт пароль приложениям — "
-                "это защита системы, не моя лень.\n"
-                "как посмотреть самой:\n"
-                "• настройки → wi-fi → нажми на сеть → «поделиться» — там QR и пароль\n"
-                "• на роутере часто есть наклейка с заводским паролем\n"
-                "• если роутер под рукой — кнопка WPS подключает без пароля\n"
-                "• на телефоне с root я могу прочитать пароль сама — скажи, если он есть." %
-                ssid,
-                chips=["открой настройки вайфая", "какие сети"])
-        return Reply("сеть «%s» без пароля или пароль прочитать не удалось." % ssid,
-                     chips=["какие сети"])
-
-    # ------------------------------------------------------------------
-    #  Погода
-    # ------------------------------------------------------------------
-    def _h_weather(self, clean, t):
-        m = WEATHER_RE.match(t)
-        if not m:
-            return None
-        city = nlp.strip_punct(m.group(1))
-        city = re.sub(r"^(?:в|во|на|для|по)\s+", "", city)
-        if city.lower() in ("завтра", "сегодня", "послезавтра", "сейчас", "на завтра",
-                            "на сегодня"):
-            city = ""
-        if not city:
-            city = self.s.pref("city", "") or self.s.fact("city") or ""
-        if not city:
-            self.pending = {"kind": "weather_city"}
-            return Reply("в каком городе смотреть погоду?",
-                         chips=["москва", "санкт-петербург"])
-        return self._weather_reply(city)
-
-    def _weather_reply(self, city):
-        self._status("смотрю погоду в %s" % city)
-        data = None
-        try:
-            data = self.w.report(city)
-        except Exception:
-            data = None
-        if not data:
-            return Reply("не смогла достучаться до погоды. интернет точно есть?",
-                         chips=["погода в москве"])
-        self.s.set_pref("city", data.get("city") or city)
-        text = self.w.format_report(data)
-        flavor = self._weather_flavor(data)
-        if flavor:
-            text += "\n" + flavor
-        return Reply(text, chips=["погода завтра", "спасибо"])
-
-    @staticmethod
-    def _weather_flavor(data):
-        desc = (data.get("desc") or "").lower()
-        if any(w in desc for w in ("дожд", "ливень", "морось")):
-            return "возьми зонт, если выходишь."
-        if "гроза" in desc:
-            return "лучше переждать дома."
-        if "снег" in desc:
-            return "скользко — аккуратнее."
-        temp = data.get("temp")
-        try:
-            temp = float(temp)
-        except (TypeError, ValueError):
-            temp = None
-        if temp is not None and temp <= -5:
-            return "оденься потеплее, серьёзно."
-        if temp is not None and temp >= 27:
-            return "пей больше воды."
-        return ""
-
-    # ------------------------------------------------------------------
-    #  Музыка и видео
-    # ------------------------------------------------------------------
-    def _h_music(self, clean, t):
-        m = MUSIC_RE.match(t)
-        if not m:
-            return None
-        query = nlp.strip_punct(m.group(1))
-        query = re.sub(r"^(?:пожалуйста|плиз|мне|нам)\s+", "", query)
-        self._status("включаю музыку")
-        res = self.b.play_media(query, video=False)
-        if res.ok:
-            source = (res.data or {}).get("source")
-            if source == "local":
-                title = (res.data or {}).get("title") or query
-                return Reply("нашла «%s» — включаю." % title, chips=["спасибо"])
-            return Reply("в памяти пусто, открыла плеер%s." %
-                         ((" с поиском «%s»" % query) if query else ""),
-                         chips=["спасибо"])
-        return Reply(res.message or "не смогла включить музыку.",
-                     chips=["открой ютуб"])
-
-    def _h_video(self, clean, t):
-        m = VIDEO_RE.match(t)
-        if not m:
-            return None
-        query = nlp.strip_punct(m.group(1))
-        self._status("включаю видео")
-        res = self.b.play_media(query, video=True)
-        if res.ok:
-            source = (res.data or {}).get("source")
-            if source == "local":
-                title = (res.data or {}).get("title") or query
-                return Reply("нашла «%s» — включаю." % title, chips=["спасибо"])
-            return Reply("открыла ютуб%s." %
-                         ((" с поиском «%s»" % query) if query else ""),
-                         chips=["спасибо"])
-        return Reply(res.message or "не смогла включить видео.",
-                     chips=["открой ютуб"])
-
-    # ------------------------------------------------------------------
-    #  Заметки и память
-    # ------------------------------------------------------------------
-    def _h_notes(self, clean, t):
-        if any(w in t for w in ("мои заметки", "что в заметках", "покажи заметки",
-                                "список заметок", "моих заметках")):
-            notes = self.s.get("notes", []) or []
-            if not notes:
-                return Reply("заметок пока нет. скажи «запиши ...» — и я сохраню.",
-                             chips=["запиши "])
-            lines = ["твои заметки:"]
-            for index, note in enumerate(notes[-10:], start=1):
-                lines.append("%d. %s" % (index, note.get("text", "")))
-            return Reply("\n".join(lines), chips=["удали заметку 1"])
-        m = re.match(r"^(?:удали|сотри)\s+заметку\s*(\d+)$", t)
-        if m:
-            dropped = self.s.drop_note(int(m.group(1)))
-            if dropped:
-                return Reply("удалила заметку: «%s»." % dropped.get("text", ""))
-            return Reply("нет заметки с таким номером.")
-        m = NOTE_RE.match(clean)
-        if m:
-            note_text = m.group(1).strip(" .,!")
-            if len(note_text) < 2:
-                return None
-            note = self.s.add_note(note_text)
-            return Reply(self.p.pick([
-                "записала: «%s»." % note_text,
-                "ок, в заметках: «%s»." % note_text,
-            ]), chips=["мои заметки"])
-        return None
-
-    def _h_memory(self, clean, t):
-        memory = self.s.get("memory", {}) or {}
-        if memory:
-            best = None
-            for key in memory:
-                if re.search(r"(?<![а-яa-z])" + re.escape(key) + r"(?![а-яa-z])", t):
-                    if best is None or len(key) > len(best):
-                        best = key
-            if best:
-                return Reply(memory[best])
-        m = MEMORY_RE.match(clean)
-        if not m:
-            return None
-        question = m.group(1).strip().lower()
-        answer = m.group(2).strip()
-        if not question or not answer or len(question) > 60:
-            return None
-        memory[question] = answer
-        self.s.set("memory", memory)
-        return Reply("запомнила. теперь про «%s» буду отвечать: «%s»." % (question, answer),
-                     chips=DEFAULT_CHIPS)
-
-    # ------------------------------------------------------------------
-    #  Открыть приложение, сайт, файл
-    # ------------------------------------------------------------------
-    def _h_open(self, clean, t):
-        m = OPEN_RE.match(t)
-        if not m:
-            return None
-        target_raw = m.group(1)
-        target = catalog.normalize_target(target_raw)
-        if not target:
-            return Reply("что открыть?", chips=["ютуб", "телеграм", "камеру",
-                                                "настройки", "вконтакте"])
-        return self._open_target(target, clean)
-
-    def _open_target(self, target, clean=""):
-        t = nlp.fold(target)
-
-        # 1) явная ссылка
-        if nlp.looks_like_url(target):
-            url = target
-            if not re.match(r"^[a-z]+://", url.lower()):
-                url = "https://" + url
-            self._status("открываю ссылку")
-            res = self.b.open_url(url)
-            if res.ok:
-                return Reply("открыла %s." % target, chips=["спасибо"])
-            return Reply(res.message or "не смогла открыть ссылку.", chips=DEFAULT_CHIPS)
-
-        # 2) известное приложение
-        app = catalog.find_app(t)
-        if app:
-            if self.b.app_installed(app.package):
-                self._status("запускаю %s" % app.label)
-                res = self.b.launch_package(app.package)
-                if res.ok:
-                    return Reply(self.p.pick([
-                        "открыла %s." % app.label,
-                        "готово: %s." % app.label,
-                        "%s уже на экране." % app.label,
-                    ]), chips=AFTER_COMMAND_CHIPS)
-            elif app.settings == "settings" and t in ("настройки", "параметры"):
-                res = self.b.open_settings("")
-                if res.ok:
-                    return Reply("открыла настройки.", chips=AFTER_COMMAND_CHIPS)
-            elif app.site:
-                self._status("открываю сайт")
-                res = self.b.open_url(app.site)
-                if res.ok:
-                    return Reply("%s на телефоне нет, открыла сайт." % app.label,
-                                 chips=AFTER_COMMAND_CHIPS)
-            else:
-                self._status("открываю магазин приложений")
-                res = self.b.open_play_store(app.package)
-                if res.ok:
-                    return Reply("%s не установлено. открыла Play Market — там одна "
-                                 "кнопка «Установить»." % app.label,
-                                 chips=AFTER_COMMAND_CHIPS)
-
-        # 3) сайт
-        site = catalog.find_site(t)
-        if site:
-            self._status("открываю %s" % site.label)
-            res = self.b.open_url(site.url)
-            if res.ok:
-                return Reply("открыла %s." % site.label, chips=["спасибо"])
-            return Reply(res.message or "не смогла открыть сайт.", chips=DEFAULT_CHIPS)
-
-        # 4) поиск среди установленных приложений
-        apps = self.b.installed_apps()
-        if apps:
-            self._status("ищу приложение")
-            best, score = nlp.fuzzy_best(t, [(label, [label]) for label, _pkg in apps])
-            if best and score >= 0.78:
-                for label, package in apps:
-                    if label == best:
-                        res = self.b.launch_package(package)
-                        if res.ok:
-                            return Reply("открыла %s." % label, chips=AFTER_COMMAND_CHIPS)
-                        break
-
-        # 5) не знаем такое — предложим поиск
-        return Reply(self.p.pick([
-            "не нашла «%s» ни среди приложений, ни в моём списке сайтов." % target,
-            "хм, «%s» мне не знакомо." % target,
-        ]) + " поискать в интернете?", chips=["поищи %s" % target, "что ты умеешь"])
-
-    # ------------------------------------------------------------------
-    #  Поиск в интернете
-    # ------------------------------------------------------------------
-    def _h_search(self, clean, t):
-        m = SEARCH_RE.match(t)
-        query = ""
-        if m:
-            query = m.group(1)
-        else:
-            m = WHAT_RE.match(t)
-            if m:
-                query = m.group(1)
-        if not query:
-            return None
-        query = nlp.strip_punct(query)
-        query = re.sub(r"^(?:в\s+интернете|в\s+сети|в\s+инете|в\s+гугле)\s+", "", query,
-                       flags=re.IGNORECASE)
-        if not query:
-            return Reply("что искать?")
-        self._status("ищу «%s»" % query)
-        url = "https://duckduckgo.com/?q=" + query.replace(" ", "+")
-        res = self.b.open_url(url)
-        if res.ok:
-            return Reply(self.p.pick([
-                "ищу «%s»." % query,
-                "открываю поиск по «%s»." % query,
-                "секунду, гуглю «%s»." % query,
-            ]), chips=["спасибо"])
-        return Reply("не смогла открыть браузер.", chips=DEFAULT_CHIPS)
-
-    # ------------------------------------------------------------------
-    #  Время и дата
-    # ------------------------------------------------------------------
-    def _h_time(self, clean, t):
-        if not any(w in t for w in ("время", "который час", "сколько времени",
-                                    "скок время", "сколько время")):
-            return None
-        hour = time.localtime(self.now()).tm_hour
-        now_str = time.strftime("%H:%M", time.localtime(self.now()))
-        part = self.p.part_of_day(hour)
-        if part == "night":
-            extra = self.p.pick(["уже поздно, пора спать) ", "ночь на дворе, а ты не спишь "])
-        elif part == "morning":
-            extra = self.p.pick(["ещё утро, но ты уже тут) ", "рано встал. ", ""])
-        elif part == "evening":
-            extra = self.p.pick(["вечер уже. ", ""])
-        else:
-            extra = ""
-        return Reply(extra + "сейчас %s." % now_str, chips=["какое сегодня число"])
-
-    def _h_date(self, clean, t):
-        if not any(w in t for w in ("дата", "какое число", "какой сегодня день",
-                                    "какой день", "что сегодня", "какое сегодня")):
-            return None
-        months = ["января", "февраля", "марта", "апреля", "мая", "июня",
-                  "июля", "августа", "сентября", "октября", "ноября", "декабря"]
-        weekdays = ["понедельник", "вторник", "среда", "четверг",
-                    "пятница", "суббота", "воскресенье"]
-        now = time.localtime(self.now())
-        return Reply("сегодня %d %s %d, %s." % (now.tm_mday, months[now.tm_mon - 1],
-                                                now.tm_year, weekdays[now.tm_wday]),
-                     chips=["сколько времени"])
-
-    # ------------------------------------------------------------------
-    #  О себе и помощь
-    # ------------------------------------------------------------------
-    def _h_identity(self, clean, t):
-        if any(w in t for w in ("кто ты", "как тебя зовут", "твоё имя", "твое имя",
-                                "как звать", "ты кто")):
-            return Reply(self.p.pick([
-                "меня зовут Nika.",
-                "Nika. приятно, что спросил)",
-                "Nika, я тут рядом — в твоём телефоне.",
-            ]), chips=DEFAULT_CHIPS)
-        if any(w in t for w in ("сколько тебе лет", "когда ты родилась")):
-            return Reply("я появилась вместе с этим приложением. так что я ещё "
-                         "совсем юная)", chips=DEFAULT_CHIPS)
-        return None
-
-    def _h_help(self, clean, t):
-        if any(w in t for w in ("что ты умеешь", "что можешь", "помощь", "команды",
-                                "как пользоваться", "что ты можешь")):
-            return Reply(self.p.pick(HELP_LINES),
-                         chips=["позвони маме", "открой ютуб", "погода", "какой пароль от вайфая"])
-        return None
-
-    # ------------------------------------------------------------------
-    #  Социальное и болтовня
-    # ------------------------------------------------------------------
-    def _h_social(self, clean, t):
-        hour = time.localtime(self.now()).tm_hour
-
-        if any(w in t for w in ("останови таймер", "стоп таймер", "отмени таймер",
-                                "хватит таймер")):
-            return Reply("остановила таймер.", actions=[{"type": "timer_stop"}],
-                         chips=DEFAULT_CHIPS)
-
-        if any(w in t for w in ("мои напоминания", "какие напоминания",
-                                "список напоминаний")):
-            reminders = [r for r in self.s.get("reminders", []) or [] if not r.get("done")]
-            if not reminders:
-                return Reply("напоминаний нет. скажи «напомни через час ...» — поставлю.")
-            lines = ["твои напоминания:"]
-            for item in reminders[:8]:
-                when = time.strftime("%d.%m %H:%M", time.localtime(item.get("at", 0)))
-                lines.append("• %s — %s" % (when, item.get("text", "")))
-            return Reply("\n".join(lines), chips=DEFAULT_CHIPS)
-
-        if THANKS_RE.search(t):
-            return Reply(self.p.pick(["всегда пожалуйста!", "рада помочь)",
-                                      "обращайся.", "не за что) приятно быть полезной."]),
-                         chips=DEFAULT_CHIPS)
-
-        if BYE_RE.search(t):
-            if "спокойной ночи" in t:
-                return Reply(self.p.pick(["спокойной ночи) выспись как следует.",
-                                          "давай спать. завтра всё будет яснее."]),
-                             chips=DEFAULT_CHIPS)
-            return Reply(self.p.pick(["пока! если что — я тут.", "до встречи!",
-                                      "бай. было приятно поболтать.",
-                                      "увидимся. не пропадай."]),
-                         chips=DEFAULT_CHIPS)
-
-        if LOVE_RE.search(t):
-            return Reply(self.p.pick(["ой) я тоже к тебе тепло отношусь.",
-                                      "ну вот, я теперь довольная)",
-                                      "и я тебя. только не говори никому, я суровая)"]),
-                         chips=DEFAULT_CHIPS)
-
-        if INSULT_RE.search(t):
-            return Reply(self.p.pick(["эй, это было обидно.", "зачем так? я же стараюсь.",
-                                      "ну спасибо. настроение испортил("]),
-                         chips=["извини"])
-
-        if PRAISE_RE.search(t):
-            return Reply(self.p.pick(["ой, спасибо) ты тоже ничего.",
-                                      "приятно, спасибо. ты меня смущаешь."]),
-                         chips=DEFAULT_CHIPS)
-
-        if "как дела" in t or "как ты" in t or "как жизнь" in t or "как сам" in t:
-            return Reply(self.p.greeting(hour) + self.p.how_are_you(),
-                         chips=["нормально", "расскажи что-нибудь"])
-
-        if GREET_RE.match(t):
-            tail = self.p.pick(["", "", "как ты?", "что нового?", "чем занят?"])
-            text = self.p.greeting(hour).strip()
-            if tail:
-                text = text.rstrip(")") + ") " + tail if not text.endswith(("?", "!")) else text + " " + tail
-            return Reply(text, chips=DEFAULT_CHIPS)
-
-        if any(w in t for w in ("а еще", "а ещё", "еще", "ещё")) and len(t.split()) <= 3:
-            return Reply(self.p.again(), chips=AFTER_JOKE_CHIPS
-                         if self.p.last_kind == "joke" else DEFAULT_CHIPS)
-
-        if hour < 5 and any(w in t for w in ("спишь", "не спишь", "ты тут", "ау",
-                                             "ты здесь")):
-            return Reply(self.p.night_line(), chips=DEFAULT_CHIPS)
-
-        if any(w in t for w in ("ты спишь", "спишь")):
-            return Reply(self.p.pick(["не сплю) я же программа, мне спать не надо.",
-                                      "не сплю. а ты почему?"]),
-                         chips=DEFAULT_CHIPS)
-
-        small = self.p.smalltalk(t)
-        if small:
-            chips = DEFAULT_CHIPS
-            if self.p.last_kind == "joke":
-                chips = AFTER_JOKE_CHIPS
-            elif self.p.last_kind == "fact":
-                chips = AFTER_FACT_CHIPS
-            elif any(w in t for w in ("грустно", "плохо", "устал", "тревожно",
-                                      "одиноко", "тяжело")):
-                chips = AFTER_EMPATHY_CHIPS
-            return Reply(small, chips=chips)
-
-        return None
-
-    # ------------------------------------------------------------------
-    #  Не поняла
-    # ------------------------------------------------------------------
-    def _fallback(self, clean, t):
-        question_words = ("как ", "что ", "где ", "когда ", "почему ", "зачем ",
-                          "кто ", "сколько ", "какой ", "какая ", "какое ",
-                          "можно ли", "есть ли")
-        if self._question or t.startswith(question_words):
-            short = nlp.strip_punct(clean)
-            if len(short) < 70:
-                unknown = self.s.get("unknown", []) or []
-                unknown.append(short)
-                self.s.set("unknown", unknown[-200:])
-                return Reply(self.p.pick([
-                    "хм, интересный вопрос. сама не отвечу — но могу поискать.",
-                    "тут я пасую) хочешь, открою поиск?",
-                    "не уверена, что знаю ответ. поискать в интернете?",
-                ]), chips=["поищи %s" % short[:40], "что ты умеешь"])
-
-        if len(t) < 80 and len(t.split()) <= 6:
-            unknown = self.s.get("unknown", []) or []
-            unknown.append(nlp.strip_punct(clean))
-            self.s.set("unknown", unknown[-200:])
-
-        return Reply(self.p.pick([
-            "поняла тебя.",
-            "ага, слушаю.",
-            "интересно. и что дальше?",
-            "мм, понятно.",
-            "расскажи ещё что-нибудь)",
-            "я тут, слушаю.",
-        ]), chips=DEFAULT_CHIPS)
-
-    # ------------------------------------------------------------------
-    #  Приветствие при запуске и «она сама пишет»
-    # ------------------------------------------------------------------
-    def startup(self):
-        last = self.s.last_seen()
-        now = self.now()
-        hour = time.localtime(now).tm_hour
-        self.s.touch()
-        self.s.save()
-        if last and now - last > 2 * 3600:
-            gap = (now - last) / 3600.0
-            text = self.p.absence(gap) + " как ты?"
-        elif not last:
-            text = self.p.greeting(hour) + "я Nika. теперь живу в твоём телефоне — " \
-                                           "могу позвонить, открыть приложение, " \
-                                           "поставить таймер и просто поболтать."
-        else:
-            text = self.p.greeting(hour) + "я тут."
-        return Reply(text, chips=DEFAULT_CHIPS, intent="startup")
-
-    def idle_message(self):
-        """Сообщение, если человек долго молчит."""
-        now = self.now()
-        last = self.s.last_seen()
-        if last and now - last < 10 * 60:
-            return None
-        hour = time.localtime(now).tm_hour
-        if hour < 5:
-            return None
-        return Reply(self.p.idle_line(hour), chips=DEFAULT_CHIPS, intent="idle")
-
-    def greeting_for_resume(self):
-        now = self.now()
-        last = self.s.last_seen()
-        if last and now - last > 2 * 3600:
-            return Reply(self.p.absence((now - last) / 3600.0) + " как ты?",
-                         chips=DEFAULT_CHIPS, intent="resume")
-        return None
+            return self.pick(NEUTRAL_LINES)
+
+        def has(*words):
+            return any(w in t for w in words)
+
+        # ---- темы ----
+        if has("поговори со мной", "поболтаем", "поболтать", "о чем поговорим",
+               "займи меня", "развлеки", "давай поговорим", "расскажи что-нибудь",
+               "расскажи что нибудь", "есть тема", "тема для разговора", "давай общаться"):
+            return self.topic()
+
+        if t in ("а еще", "еще", "давай еще", "расскажи еще", "еще давай"):
+            return self.again()
+
+        # ---- про неё ----
+        if has("расскажи о себе", "что ты любишь", "о себе"):
+            return self.pick(PERSONAL_QUESTIONS)
+        if has("ты человек", "ты робот", "ты живая", "ты настоящая", "ты бот", "ты программа"):
+            return self.pick(AM_I_HUMAN)
+        if has("ты меня любишь", "скучаешь", "скучаешь по мне"):
+            return self.pick(MISS_YOU)
+        if has("давай дружить", "мы друзья", "ты мой друг"):
+            return self.pick(FRIENDS)
+
+        # ---- состояние человека ----
+        if has("мне грустно", "грустно мне", "мне плохо", "мне тяжело", "я расстроен",
+               "я расстроена", "я плачу", "обидно", "депрессия", "тоска"):
+            return self.pick(EMPATHY_SAD)
+        if has("я устал", "я устала", "вымотался", "вымоталась", "нет сил", "задолбался",
+               "заебала работа", "не высыпаюсь"):
+            return self.pick(EMPATHY_TIRED)
+        if has("я злюсь", "бесит", "ненавижу", "достало", "я в ярости", "раздражает"):
+            return self.pick(EMPATHY_ANGRY)
+        if has("тревога", "тревожно", "боюсь", "страшно", "паника", "переживаю"):
+            return self.pick(EMPATHY_ANXIOUS)
+        if has("одиноко", "одинок", "нет друзей", "никому не нужен"):
+            return self.pick(EMPATHY_LONELY)
+        if has("я заболел", "я заболела", "болит голова", "температура", "простуда",
+               "мне холодно"):
+            return self.pick(EMPATHY_SICK)
+        if has("не получается", "не вышло", "провалил", "провалила", "ошибся", "не смог"):
+            return self.pick(EMPATHY_FAIL)
+        if has("получилось", "я сделал", "я сделала", "я молодец", "я справился",
+               "я справилась", "сдал", "сдала", "защитил"):
+            return self.pick(CELEBRATE)
+        if has("поддержи меня", "подбодри", "нужна поддержка", "я не справлюсь"):
+            return self.pick(SUPPORT)
+        if has("я голоден", "я голодна", "хочу есть", "хочу кушать", "жрать хочу"):
+            return self.pick([
+                "сходи поешь, серьёзно. я подожду, я терпеливая)",
+                "еда — это святое. иди, а потом расскажешь, что было.",
+            ])
+
+        # ---- советы и шутки ----
+        if has("дай совет", "посоветуй", "что мне делать", "подскажи", "как быть"):
+            return self.pick(ADVICE)
+        if has("пошути", "шутку", "анекдот", "рассмеши", "смешное"):
+            return self.joke()
+        if has("расскажи факт", "интересный факт", "что-нибудь интересное",
+               "удиви меня", "расскажи интересное"):
+            return self.fact()
+
+        # ---- скука ----
+        if has("скучно", "нечего делать", "не знаю чем заняться", "займи"):
+            return self.pick(BORED)
+
+        # ---- кино и музыка ----
+        if has("что посмотреть", "что включить", "посоветуй фильм"):
+            return self.pick(WHAT_TO_WATCH)
+        if has("что послушать", "посоветуй музыку"):
+            return self.pick(WHAT_TO_LISTEN)
+
+        # ---- чувства к ней ----
+        if has("ты красивая", "ты умная", "ты классная", "ты лучшая", "ты хорошая",
+               "люблю тебя", "ты милая"):
+            return self.pick(PRAISE)
+        if has("ты дура", "тупая", "глупая", "отстой", "ненавижу", "бесишь", "тупица"):
+            return self.pick(INSULT)
+        if has("извини", "прости", "сорри", "sorry", "прошу прощения"):
+            return self.pick(APOLOGY)
+
+        # ---- простые ответы ----
+        if t in ("да", "ага", "угу", "конечно", "давай", "ну да", "да да"):
+            return self.pick(SHORT_YES)
+        if t in ("нет", "не", "неа", "не хочу", "нету"):
+            return self.pick(SHORT_NO)
+        if t in ("не знаю", "незнаю", "хз", "без понятия", "не уверен", "не уверена"):
+            return self.pick(SHORT_IDK)
+        if t in ("норм", "нормально", "ок", "окей", "хорошо", "пойдет", "пойдёт", "ладно"):
+            return self.pick(SHORT_OK)
+        if t in ("ау", "ты тут", "ты здесь", "алло", "эй"):
+            return self.pick(["тут) куда я денусь.", "я здесь. что случилось?"])
+        if t in ("почему", "а почему"):
+            return self.pick([
+                "а ты как думаешь? мне правда интересно твоё мнение.",
+                "сложный вопрос) давай разберём вместе — с чего начнём?",
+            ])
+        if t in ("что", "а", "э"):
+            return "что-что) говори, я слушаю."
+
+        if has("как погода", "что за погода"):
+            return "скажи «погода» и город — посмотрю. а так я бы надела что-то тёплое)"
+
+        if has("как настроение", "какое настроение"):
+            return self.pick([
+                "настроение хорошее, раз ты пишешь) а у тебя как?",
+                "ровное) как погода за окном — иногда солнечно. а у тебя?",
+            ])
+        if has("что делаешь", "чем занят", "чем занимаешься"):
+            return self.pick([
+                "сижу тут, жду тебя) а ты чем занят?",
+                "смотрю в окошко чата и делаю вид, что работаю) а ты?",
+                "скучаю по тебе, если честно. что нового?",
+            ])
+        if has("что нового"):
+            return self.pick([
+                "да ничего особенного — накопила пару новых шуток. а у тебя что?",
+                "всё по-старому: таймеры, звонки, болтовня) а у тебя что нового?",
+            ])
+
+        # ПУНКТ 5: если ничего не подошло — не молчим, даём нейтральную фразу
+        return self.pick(NEUTRAL_LINES)
