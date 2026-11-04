@@ -87,13 +87,16 @@ class AndroidBridge(Bridge):
         self._ctx = _activity() if _JAVA else None
         self._tts = None
         self._tts_ready = False
+        self._tts_voice_set = False
         self._listen_cb = None
         self._listener = None
         self._recognizer = None
         self._torch_id = None
         self._torch_on = False
+        self._tap_loaded = False
         if _JAVA and self._ctx is not None:
             self._init_tts()
+            self._init_tap_sound()
 
     # ------------------------------------------------------------------
     #  Служебное
@@ -429,6 +432,7 @@ class AndroidBridge(Bridge):
 
     # ------------------------------------------------------------------
     #  Уведомления и вибрация
+    #  ПУНКТ 2: таймер/напоминание должны реально звучать
     # ------------------------------------------------------------------
     def notify(self, title, text):
         try:
@@ -442,18 +446,44 @@ class AndroidBridge(Bridge):
                 return Res(False, "нет разрешения на уведомления")
 
             Builder = jclass("android.app.Notification$Builder")
+            RingtoneManager = jclass("android.media.RingtoneManager")
+            Uri = jclass("android.net.Uri")
+            try:
+                default_sound = RingtoneManager.getDefaultUri(
+                    RingtoneManager.TYPE_NOTIFICATION)
+            except Exception:
+                default_sound = None
+
             if sdk >= 26:
                 Channel = jclass("android.app.NotificationChannel")
-                manager.createNotificationChannel(
-                    Channel(self.NOTIF_CHANNEL, "Nika", 3))
+                AudioAttributes = jclass("android.media.AudioAttributes")
+                channel = Channel(self.NOTIF_CHANNEL, "Nika", 4)  # IMPORTANCE_HIGH
+                try:
+                    if default_sound is not None:
+                        attrs = AudioAttributes.Builder() \
+                            .setUsage(AudioAttributes.USAGE_NOTIFICATION) \
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION) \
+                            .build()
+                        channel.setSound(default_sound, attrs)
+                except Exception:
+                    pass
+                channel.enableVibration(True)
+                manager.createNotificationChannel(channel)
                 builder = Builder(self._ctx, self.NOTIF_CHANNEL)
             else:
                 builder = Builder(self._ctx)
+
             icon = self._ctx.getApplicationInfo().icon
             builder.setContentTitle(str(title))
             builder.setContentText(str(text))
             builder.setSmallIcon(icon)
             builder.setAutoCancel(True)
+            try:
+                if default_sound is not None:
+                    builder.setSound(default_sound)
+                builder.setDefaults(-1)  # ALL: звук + вибрация + свет
+            except Exception:
+                pass
             manager.notify(self.NOTIF_ID, builder.build())
             return Res(True, "")
         except Exception as exc:
@@ -477,7 +507,73 @@ class AndroidBridge(Bridge):
             return Res(False, "")
 
     # ------------------------------------------------------------------
+    #  ПУНКТ 2: короткий звук таймера/напоминания
+    # ------------------------------------------------------------------
+    def beep(self):
+        """Один короткий системный звук уведомления (без длинных рингтонов)."""
+        try:
+            RingtoneManager = jclass("android.media.RingtoneManager")
+            uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            ringtone = RingtoneManager.getRingtone(self._ctx, uri)
+            if ringtone is None:
+                return Res(False, "")
+            try:
+                RingtoneManager.getRingtone
+                Build = jclass("android.os.Build$VERSION")
+                if int(Build.SDK_INT) >= 21:
+                    AudioAttributes = jclass("android.media.AudioAttributes")
+                    attrs = AudioAttributes.Builder() \
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION) \
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION) \
+                        .build()
+                    ringtone.setAudioAttributes(attrs)
+            except Exception:
+                pass
+            ringtone.play()
+            return Res(True, "")
+        except Exception as exc:
+            self._emit("beep", exc)
+            return Res(False, "")
+
+    # ------------------------------------------------------------------
+    #  ПУНКТ 7: очень короткий тихий клик нажатия
+    # ------------------------------------------------------------------
+    def _init_tap_sound(self):
+        try:
+            Context = jclass("android.content.Context")
+            self._audio = self._ctx.getSystemService(Context.AUDIO_SERVICE)
+        except Exception:
+            self._audio = None
+        self._tap_loaded = True
+
+    def tap(self):
+        """Короткий клик (~20–30 мс), тихий, без «дешманского» длинного звука."""
+        # 1) штатный системный эффект — самый короткий и тихий
+        try:
+            if getattr(self, "_audio", None) is None:
+                Context = jclass("android.content.Context")
+                self._audio = self._ctx.getSystemService(Context.AUDIO_SERVICE)
+            AudioManager = jclass("android.media.AudioManager")
+            if self._audio is not None:
+                self._audio.playSoundEffect(
+                    AudioManager.FX_KEYPRESS_STANDARD, 0.35)
+                return Res(True, "")
+        except Exception:
+            pass
+        # 2) ToneGenerator на 15 мс — если системный эффект выключен
+        try:
+            ToneGenerator = jclass("android.media.ToneGenerator")
+            AudioManager = jclass("android.media.AudioManager")
+            tone = ToneGenerator(AudioManager.STREAM_SYSTEM, 25)
+            tone.startTone(ToneGenerator.TONE_PROP_BEEP, 15)
+            return Res(True, "")
+        except Exception:
+            pass
+        return Res(False, "")
+
+    # ------------------------------------------------------------------
     #  Голос
+    #  ПУНКТ 3: женский русский голос, не «переводчик»
     # ------------------------------------------------------------------
     def _init_tts(self):
         try:
@@ -507,15 +603,75 @@ class AndroidBridge(Bridge):
         try:
             Locale = jclass("java.util.Locale")
             self._tts.setLanguage(Locale("ru", "RU"))
-            self._tts.setSpeechRate(0.97)
-            self._tts.setPitch(1.04)
+            self._tts.setSpeechRate(0.94)
+            self._tts.setPitch(1.06)
         except Exception as exc:
             self._emit("tts_lang", exc)
+        # выбираем именно женский голос, если он есть
+        self._select_female_voice()
 
-    def speak(self, text):
+    def _select_female_voice(self):
+        """ПУНКТ 3: ищем ru-RU voice с признаком female (или по имени)."""
+        if self._tts is None or self._tts_voice_set:
+            return
+        try:
+            voices = self._tts.getVoices()
+            if voices is None:
+                return
+            chosen = None
+            fallback = None
+            for voice in voices:
+                try:
+                    locale = voice.getLocale()
+                    if locale is None:
+                        continue
+                    lang = str(locale.getLanguage() or "").lower()
+                    if lang != "ru":
+                        continue
+                    name = str(voice.getName() or "").lower()
+                    features = set()
+                    try:
+                        features = set(str(f).lower() for f in voice.getFeatures())
+                    except Exception:
+                        pass
+                    female_marker = ("female" in name or "жен" in name or
+                                     "female" in features or
+                                     name.endswith("-f") or "-f-" in name)
+                    if female_marker and not voice.isNetworkConnectionRequired():
+                        chosen = voice
+                        break
+                    if fallback is None and not voice.isNetworkConnectionRequired():
+                        fallback = voice
+                except Exception:
+                    continue
+            target = chosen or fallback
+            if target is not None:
+                self._tts.setVoice(target)
+                self._tts_voice_set = True
+                # чуть подстраиваем тон под выбранный голос
+                self._tts.setPitch(1.08 if chosen else 1.04)
+                self._tts.setSpeechRate(0.94)
+        except Exception as exc:
+            self._emit("tts_voice", exc)
+
+    def speak(self, text, female=True):
         if not text or self._tts is None or not self._tts_ready:
             return Res(False, "")
         try:
+            if female and not self._tts_voice_set:
+                self._select_female_voice()
+            if female:
+                try:
+                    self._tts.setPitch(1.08)
+                    self._tts.setSpeechRate(0.94)
+                except Exception:
+                    pass
+            else:
+                try:
+                    self._tts.setPitch(0.96)
+                    self._tts.setSpeechRate(1.0)
+                except Exception:
+                    pass
             self._tts.speak(text, 0, None, "nika-%d" % int(time.time() * 1000))
             return Res(True, "")
         except Exception as exc:
