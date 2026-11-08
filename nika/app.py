@@ -174,40 +174,47 @@ class NikaApp(toga.App):
         width = self._content_width()
         self._layout_width = width
 
+        # красная рамка в 1px: акцентный внешний бокс и тёмный внутренний
         self.root = toga.Box(style=_pack(direction="column",
-                                         background_color=theme.BG))
+                                         background_color=theme.ACCENT,
+                                         padding=1))
+        self.body = toga.Box(style=_pack(direction="column",
+                                         background_color=theme.BG,
+                                         padding=(0, 0, 0, 4),
+                                         flex=1))
+        self.root.add(self.body)
 
         # ---------- шапка: только имя, кнопки голоса и помощи ----------
-        header = toga.Box(style=_pack(direction="row", width=width,
+        header = toga.Box(style=_pack(direction="row", width=width, height=64,
                                       padding=6, gap=4))
         title = toga.Label("Nika", style=_pack(
             color=theme.ACCENT, font_size=22, font_weight="bold",
-            width=max(90, width - 142), padding=(4, 6, 4, 6)))
+            width=max(90, width - 150), height=50, padding=(6, 6, 6, 6)))
         self.voice_button = toga.Button(
             "голос" if self._voice else "тихо",
             on_press=self._on_voice,
-            style=_pack(width=82, height=34, font_size=12,
+            style=_pack(width=86, height=48, font_size=13,
                         background_color=theme.ACCENT if self._voice else theme.CHIP,
                         color=theme.ON_ACCENT if self._voice else theme.MUTED_LIGHT))
         help_button = toga.Button(
             "?", on_press=self._on_help,
-            style=_pack(width=40, height=34, font_size=14,
+            style=_pack(width=42, height=48, font_size=15,
                         background_color=theme.CHIP, color=theme.MUTED_LIGHT))
         header.add(title)
         header.add(self.voice_button)
         header.add(help_button)
-        self.root.add(header)
+        self.body.add(header)
 
         # ---------- полоса таймера (появляется при необходимости) ----------
         self._timer_row = toga.Box(style=_pack(direction="row", width=width,
-                                               padding=(4, 8, 4, 8),
+                                               height=46, padding=(4, 8, 4, 8),
                                                background_color=theme.BUBBLE))
         self._timer_label = toga.Label("", style=_pack(
-            width=max(120, width - 80), color=theme.ACCENT, font_size=13,
-            padding=(2, 4, 2, 4)))
+            width=max(120, width - 86), height=38, color=theme.ACCENT,
+            font_size=13, padding=(2, 4, 2, 4)))
         self._timer_stop = toga.Button(
             "стоп", on_press=self._on_stop_timer,
-            style=_pack(width=60, height=28, font_size=11,
+            style=_pack(width=66, height=38, font_size=12,
                         background_color=theme.CHIP, color=theme.MUTED_LIGHT))
         self._timer_row.add(self._timer_label)
         self._timer_row.add(self._timer_stop)
@@ -218,7 +225,7 @@ class NikaApp(toga.App):
         self.scroll = toga.ScrollContainer(horizontal=False, vertical=True,
                                            style=_pack(flex=1))
         self.scroll.content = self.chat_box
-        self.root.add(self.scroll)
+        self.body.add(self.scroll)
 
         # подсказки убраны: на телефоне они не влезали и мешали
         self.chips_box = toga.Box(style=_pack(direction="row", width=width))
@@ -226,25 +233,25 @@ class NikaApp(toga.App):
 
         # ---------- строка ввода ----------
         input_row = toga.Box(style=_pack(direction="row", width=width,
-                                         padding=(6, 8, 6, 8), gap=4,
-                                         background_color=theme.INPUT))
+                                         height=66, padding=(6, 8, 6, 10),
+                                         gap=4, background_color=theme.INPUT))
         self.input = toga.TextInput(
             placeholder="напиши сообщение",
             on_confirm=self._on_confirm,
-            style=_pack(width=max(120, width - 120), height=38, font_size=14,
+            style=_pack(width=max(120, width - 126), height=46, font_size=14,
                         background_color=theme.INPUT, color=theme.ACCENT))
         mic = toga.Button(
             "мик.", on_press=self._on_mic,
-            style=_pack(width=54, height=38, font_size=12,
+            style=_pack(width=58, height=48, font_size=12,
                         background_color=theme.CHIP, color=theme.MUTED_LIGHT))
         send = toga.Button(
             "→", on_press=self._on_send,
-            style=_pack(width=44, height=38, font_size=17,
+            style=_pack(width=46, height=48, font_size=17,
                         background_color=theme.ACCENT, color=theme.ON_ACCENT))
         input_row.add(self.input)
         input_row.add(mic)
         input_row.add(send)
-        self.root.add(input_row)
+        self.body.add(input_row)
 
         return self.root
 
@@ -252,7 +259,7 @@ class NikaApp(toga.App):
     #  Сообщения
     # ------------------------------------------------------------------
     def _add_message(self, text, mine=False):
-        width = self._layout_width - 16
+        width = self._layout_width - 8
         row = toga.Box(style=_pack(direction="row", width=width,
                                    padding=(2, 4, 2, 4)))
         label = toga.Label(
@@ -280,22 +287,20 @@ class NikaApp(toga.App):
         self._scroll_now()
         try:
             loop = asyncio.get_running_loop()
-            loop.call_later(0.08, self._scroll_now)
-            loop.call_later(0.30, self._scroll_now)
+            for delay in (0.05, 0.15, 0.35, 0.8, 1.5, 2.5):
+                loop.call_later(delay, self._scroll_now)
         except Exception:
             pass
 
     def _scroll_now(self):
+        # vertical_position — позиция в пикселях; максимум = низ
         try:
-            for name in ("scroll_to_bottom", "scroll_to_end"):
-                method = getattr(self.scroll, name, None)
-                if callable(method):
-                    method()
-                    return
+            self.scroll.vertical_position = int(self.scroll.max_vertical_position)
+            return
         except Exception:
             pass
         try:
-            self.scroll.vertical_position = 1.0
+            self.scroll.vertical_position = 10 ** 6
         except Exception:
             pass
 
@@ -571,15 +576,15 @@ class NikaApp(toga.App):
         self._timer_shown = visible
         if visible:
             try:
-                self.root.insert(1, self._timer_row)
+                self.body.insert(1, self._timer_row)
             except Exception:
                 try:
-                    self.root.add(self._timer_row)
+                    self.body.add(self._timer_row)
                 except Exception:
                     pass
         else:
             try:
-                self.root.remove(self._timer_row)
+                self.body.remove(self._timer_row)
             except Exception:
                 pass
 
