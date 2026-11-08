@@ -109,6 +109,11 @@ class Bridge:
     def vibrate(self, ms: int = 40) -> Res:
         return Res(False, "")
 
+    # ---------- экран ----------
+    def pixel_ratio(self) -> float:
+        """Сколько физических пикселей в одном DIP (для линий в 1 пиксель)."""
+        return 1.0
+
     # ---------- голос ----------
     def speak(self, text: str) -> Res:
         return Res(False, "")
@@ -116,8 +121,21 @@ class Bridge:
     def stop_speak(self) -> Res:
         return Res(False, "")
 
-    def listen(self, callback: Callable[[Optional[str]], None]) -> Res:
+    def listen(self, callback: Callable[[Optional[str]], None],
+               on_level: Optional[Callable[[float], None]] = None,
+               on_state: Optional[Callable[[str], None]] = None,
+               on_partial: Optional[Callable[[str], None]] = None) -> Res:
+        """Слушает микрофон.
+
+        callback получает распознанный текст (или None, если не вышло).
+        on_level — громкость голоса в дБ (для «волн» голосового ввода),
+        on_state — этапы ("speech", "end", "error"), on_partial — черновик текста.
+        """
         return Res(False, "голосовой ввод работает на телефоне.")
+
+    def stop_listen(self) -> Res:
+        """Останавливает распознавание речи, если оно идёт."""
+        return Res(False, "")
 
     # ---------- звук и системная шапка ----------
     def click(self) -> Res:
