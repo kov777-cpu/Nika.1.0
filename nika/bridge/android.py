@@ -613,10 +613,37 @@ class AndroidBridge(Bridge):
                     pass
             try:
                 Color = jclass("android.graphics.Color")
+                View = jclass("android.view.View")
                 window = self._ctx.getWindow()
-                window.setStatusBarColor(Color.parseColor("#0d0d0f"))
+                window.setStatusBarColor(Color.TRANSPARENT)
                 window.setNavigationBarColor(Color.parseColor("#0d0d0f"))
-                hidden = True
+                sdk = int(jclass("android.os.Build$VERSION").SDK_INT)
+                if sdk >= 30:
+                    try:
+                        window.setDecorFitsSystemWindows(False)
+                    except Exception:
+                        pass
+                    controller = None
+                    try:
+                        controller = window.getInsetsController()
+                    except Exception:
+                        pass
+                    if controller is None:
+                        try:
+                            controller = window.getDecorView().getWindowInsetsController()
+                        except Exception:
+                            pass
+                    if controller is not None:
+                        WindowInsets = jclass("android.view.WindowInsets")
+                        controller.hide(WindowInsets.Type.statusBars())
+                        hidden = True
+                else:
+                    decor = window.getDecorView()
+                    decor.setSystemUiVisibility(
+                        View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_FULLSCREEN)
+                    hidden = True
             except Exception:
                 pass
             return hidden
@@ -660,7 +687,19 @@ class AndroidBridge(Bridge):
                     except Exception:
                         pass
 
-            self._tts = TextToSpeech(self._ctx, OnInit(self._on_tts_ready))
+            engine = None
+            try:
+                self._ctx.getPackageManager().getPackageInfo("com.google.android.tts", 0)
+                engine = "com.google.android.tts"
+            except Exception:
+                engine = None
+            if engine:
+                try:
+                    self._tts = TextToSpeech(self._ctx, OnInit(self._on_tts_ready), engine)
+                except Exception:
+                    self._tts = TextToSpeech(self._ctx, OnInit(self._on_tts_ready))
+            else:
+                self._tts = TextToSpeech(self._ctx, OnInit(self._on_tts_ready))
         except Exception as exc:
             self._emit("tts", exc)
             self._tts = None
@@ -735,10 +774,10 @@ class AndroidBridge(Bridge):
                 self._tts.setVoice(best)
         except Exception as exc:
             self._emit("voice_choice", exc)
-        # чуть выше и медленнее — убирает «робота из переводчика»
+        # выше и медленнее — убирает «робота из переводчика»
         try:
-            self._tts.setPitch(1.08)
-            self._tts.setSpeechRate(0.95)
+            self._tts.setPitch(1.16 if best is not None else 1.2)
+            self._tts.setSpeechRate(0.9)
         except Exception:
             pass
 
