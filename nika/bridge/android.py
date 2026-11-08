@@ -613,37 +613,17 @@ class AndroidBridge(Bridge):
                     pass
             try:
                 Color = jclass("android.graphics.Color")
-                View = jclass("android.view.View")
+                WindowManager = jclass("android.view.WindowManager$LayoutParams")
                 window = self._ctx.getWindow()
-                window.setStatusBarColor(Color.TRANSPARENT)
+                window.addFlags(WindowManager.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
+                window.setStatusBarColor(Color.parseColor("#0d0d0f"))
                 window.setNavigationBarColor(Color.parseColor("#0d0d0f"))
-                sdk = int(jclass("android.os.Build$VERSION").SDK_INT)
-                if sdk >= 30:
-                    try:
-                        window.setDecorFitsSystemWindows(False)
-                    except Exception:
-                        pass
-                    controller = None
-                    try:
-                        controller = window.getInsetsController()
-                    except Exception:
-                        pass
-                    if controller is None:
-                        try:
-                            controller = window.getDecorView().getWindowInsetsController()
-                        except Exception:
-                            pass
-                    if controller is not None:
-                        WindowInsets = jclass("android.view.WindowInsets")
-                        controller.hide(WindowInsets.Type.statusBars())
-                        hidden = True
-                else:
-                    decor = window.getDecorView()
-                    decor.setSystemUiVisibility(
-                        View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                        | View.SYSTEM_UI_FLAG_FULLSCREEN)
-                    hidden = True
+                # светлые иконки на тёмном статус-баре
+                try:
+                    window.getDecorView().setSystemUiVisibility(0)
+                except Exception:
+                    pass
+                hidden = True
             except Exception:
                 pass
             return hidden
