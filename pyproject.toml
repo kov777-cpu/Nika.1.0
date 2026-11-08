@@ -25,6 +25,13 @@ requires = ["toga"]
 [tool.briefcase.app.nika.android]
 requires = ["toga-android", "certifi"]
 
+# тёмная тема вместо зелёной системной шапки и статус-бара
+base_theme = "Theme.AppCompat.NoActionBar"
+primary_color = "#0d0d0f"
+primary_color_dark = "#0d0d0f"
+accent_color = "#c81e3a"
+splash_background_color = "#0d0d0f"
+
 # В Briefcase 0.3.2x permission — это словарь: имя разрешения -> атрибуты.
 # INTERNET и ACCESS_NETWORK_STATE добавляются автоматически.
 [tool.briefcase.app.nika.android.permission]
