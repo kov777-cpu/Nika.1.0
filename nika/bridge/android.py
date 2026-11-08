@@ -89,6 +89,9 @@ class AndroidBridge(Bridge):
         self._ctx = _activity() if _JAVA else None
         self._tts = None
         self._tts_ready = False
+        self._tts_pending = None
+        self._voice_female = False
+        self._voice_tuned = False
         self._listen_cb = None
         self._listener = None
         self._recognizer = None
@@ -130,6 +133,14 @@ class AndroidBridge(Bridge):
         except Exception:
             pass
         self._ctx.startActivity(intent)
+
+    def pixel_ratio(self):
+        """Плотность экрана: 1 DIP = density физических пикселей."""
+        try:
+            metrics = self._ctx.getResources().getDisplayMetrics()
+            return float(metrics.density)
+        except Exception:
+            return 1.0
 
     # ------------------------------------------------------------------
     #  Ссылки, приложения, магазин
@@ -688,11 +699,7 @@ class AndroidBridge(Bridge):
         self._tts_ready = bool(ok)
         if not ok or self._tts is None:
             return
-        try:
-            Locale = jclass("java.util.Locale")
-            self._tts.setLanguage(Locale("ru", "RU"))
-        except Exception as exc:
-            self._emit("tts_lang", exc)
+        self._apply_language()
         try:
             AudioAttributes = jclass("android.media.AudioAttributes")
             attributes = (AudioAttributes.Builder()
@@ -703,11 +710,67 @@ class AndroidBridge(Bridge):
         except Exception:
             pass
         self._configure_voice()
+        # список голосов иногда приходит с задержкой — пробуем ещё раз позже
+        try:
+            timer = threading.Timer(1.5, self._retry_voice)
+            timer.daemon = True
+            timer.start()
+        except Exception:
+            pass
+        pending = self._tts_pending
+        self._tts_pending = None
+        if pending:
+            self.speak(pending)
+
+    def _apply_language(self):
+        """Ставит русский язык, пробуя пару вариантов локали."""
+        Locale = None
+        try:
+            Locale = jclass("java.util.Locale")
+        except Exception:
+            return False
+        for args in (("ru", "RU"), ("ru", None)):
+            try:
+                locale = Locale(args[0], args[1]) if args[1] else Locale(args[0])
+                status = int(self._tts.setLanguage(locale))
+                if status >= 0:      # LANG_MISSING_DATA = -1, LANG_NOT_SUPPORTED = -2
+                    return True
+            except Exception as exc:
+                self._emit("tts_lang", exc)
+        return False
+
+    def _retry_voice(self):
+        if self._voice_female:
+            return
+        try:
+            self._configure_voice()
+        except Exception:
+            pass
 
     def _configure_voice(self):
-        """Выбирает женский русский голос, а не «переводчика» по умолчанию."""
+        """Выбирает женский русский голос.
+
+        Android не отдаёт пол голоса отдельным полем, поэтому смотрим на имя
+        и признаки голоса, а если женского нет — поднимаем тон: мужской голос
+        с pitch 1.4 звучит женственно, а «переводчик» из настроек по умолчанию
+        так не звучит никогда.
+        """
+        if self._tts is None:
+            return
+        female_marks = (
+            "female", "жен", "ruf", "rua", "wavenet-a", "wavenet-c",
+            "standard-a", "standard-c", "neural-a", "neural-c", "zira",
+            "alena", "alyona", "milena", "katya", "tatiana", "tatyana",
+            "irina", "svetlana",
+        )
+        male_marks = (
+            "male", "муж", "rur", "rud", "ru-m", "wavenet-b", "wavenet-d",
+            "standard-b", "standard-d", "neural-b", "neural-d", "pavel",
+            "dmitri", "dmitry", "yuri", "maxim",
+        )
         best = None
-        best_score = -1
+        best_score = -999
+        best_name = ""
         try:
             voices = self._tts.getVoices()
             iterator = voices.iterator() if voices is not None else None
@@ -733,38 +796,64 @@ class AndroidBridge(Bridge):
                             features += str(feature_iterator.next()).lower() + " "
                 except Exception:
                     pass
+                haystack = name + " " + features
+                female = ("female" in haystack) or ("жен" in haystack)
+                male = (not female) and (("male" in haystack) or ("муж" in haystack))
+                if not female and not male:
+                    female = any(mark in name for mark in female_marks)
+                    male = (not female) and any(mark in name for mark in male_marks)
                 score = 0
-                if "female" in features or "female" in name:
-                    score += 6
-                if "ruf" in name:      # ruf — женские голоса Google
-                    score += 4
-                if "rur" in name:
-                    score += 1
+                if female:
+                    score += 40
+                if male:
+                    score -= 40
+                if "ruf" in name:
+                    score += 12
+                if "rur" in name or "rud" in name:
+                    score -= 12
                 try:
                     if voice.isNetworkConnectionRequired():
-                        score += 0   # сетевой голос может не работать без интернета
+                        score -= 2      # без интернета сетевой голос молчит
                     else:
-                        score += 3   # локальный женский голос — приоритет
+                        score += 4
                 except Exception:
                     pass
+                if "notinstalled" in features.replace(" ", ""):
+                    score -= 60
                 if score > best_score:
                     best_score = score
                     best = voice
-            if best is not None:
-                self._tts.setVoice(best)
+                    best_name = name
         except Exception as exc:
             self._emit("voice_choice", exc)
-        # выше и медленнее — убирает «робота из переводчика»
+
+        applied = False
+        if best is not None:
+            try:
+                self._tts.setVoice(best)
+                applied = True
+                self._emit("voice", "выбран %s (score %s)" % (best_name, best_score))
+            except Exception as exc:
+                self._emit("voice_set", exc)
+
+        # уверенный женский голос не задираем, иначе — поднимаем тон
+        self._voice_female = applied and best_score >= 20
         try:
-            self._tts.setPitch(1.16 if best is not None else 1.2)
-            self._tts.setSpeechRate(0.9)
+            self._tts.setPitch(1.16 if self._voice_female else 1.45)
+            self._tts.setSpeechRate(0.94)
         except Exception:
             pass
+        self._voice_tuned = True
 
     def speak(self, text):
-        if not text or self._tts is None or not self._tts_ready:
+        if not text:
+            return Res(False, "")
+        if self._tts is None or not self._tts_ready:
+            self._tts_pending = text
             return Res(False, "")
         try:
+            if not self._voice_tuned:
+                self._configure_voice()
             self._tts.speak(text, 0, None, "nika-%d" % int(time.time() * 1000))
             return Res(True, "")
         except Exception as exc:
@@ -772,6 +861,7 @@ class AndroidBridge(Bridge):
             return Res(False, "")
 
     def stop_speak(self):
+        self._tts_pending = None
         try:
             if self._tts is not None:
                 self._tts.stop()
@@ -805,58 +895,71 @@ class AndroidBridge(Bridge):
                 self._emit("ui_thread", exc)
                 return False
 
-    def _make_listener(self, on_result):
+    def _make_listener(self, on_result, on_level=None, on_state=None,
+                       on_partial=None):
         RecognitionListener = jclass("android.speech.RecognitionListener")
+
+        def emit(callback, *args):
+            if callback is None:
+                return
+            try:
+                callback(*args)
+            except Exception as exc:
+                self._emit("stt_cb", exc)
+
+        def first_match(results):
+            try:
+                matches = results.getStringArrayList("results_recognition")
+                if matches is not None and matches.size() > 0:
+                    return str(matches.get(0))
+            except Exception:
+                pass
+            return ""
 
         class Listener(dynamic_proxy(RecognitionListener)):
             def onReadyForSpeech(self, params):
-                pass
+                emit(on_state, "ready")
 
             def onBeginningOfSpeech(self):
-                pass
+                emit(on_state, "speech")
 
             def onRmsChanged(self, rms):
-                pass
+                emit(on_level, rms)
 
             def onBufferReceived(self, buffer):
                 pass
 
             def onEndOfSpeech(self):
-                pass
+                emit(on_state, "end")
 
             def onError(self, error):
-                try:
-                    on_result(None)
-                except Exception:
-                    pass
+                emit(on_state, "error")
+                emit(on_result, None)
 
             def onResults(self, results):
-                text = None
-                try:
-                    matches = results.getStringArrayList("results_recognition")
-                    if matches is not None and matches.size() > 0:
-                        text = str(matches.get(0))
-                except Exception:
-                    text = None
-                try:
-                    on_result(text)
-                except Exception:
-                    pass
+                emit(on_result, first_match(results))
 
             def onPartialResults(self, results):
-                pass
+                text = first_match(results)
+                if text:
+                    emit(on_partial, text)
 
             def onEvent(self, event_type, params):
                 pass
 
         return Listener()
 
-    def listen(self, callback):
+    def listen(self, callback, on_level=None, on_state=None, on_partial=None):
         if not self.has_permission("RECORD_AUDIO"):
             def after_grant(ok):
                 if ok:
-                    self.listen(callback)
+                    self.listen(callback, on_level, on_state, on_partial)
                 else:
+                    if on_state is not None:
+                        try:
+                            on_state("denied")
+                        except Exception:
+                            pass
                     callback(None)
             self.request_permissions(["RECORD_AUDIO"], after_grant)
             return Res(True, "")
@@ -866,19 +969,28 @@ class AndroidBridge(Bridge):
             SpeechRecognizer = jclass("android.speech.SpeechRecognizer")
             Intent = jclass("android.content.Intent")
 
+            try:
+                if not SpeechRecognizer.isRecognitionAvailable(self._ctx):
+                    return Res(False, "на телефоне нет службы распознавания речи.")
+            except Exception:
+                pass
+
             intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
             intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,
                             RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ru-RU")
+            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "ru-RU")
             intent.putExtra(RecognizerIntent.EXTRA_PROMPT, "Говори, я слушаю")
             intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            if on_partial is not None:
+                intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, True)
 
-            listener = self._make_listener(callback)
+            listener = self._make_listener(callback, on_level, on_state, on_partial)
 
             def start():
                 # SpeechRecognizer положено создавать и запускать в UI-потоке
-                if self._recognizer is None:
-                    self._recognizer = SpeechRecognizer.createSpeechRecognizer(self._ctx)
+                self._destroy_recognizer()
+                self._recognizer = SpeechRecognizer.createSpeechRecognizer(self._ctx)
                 self._recognizer.setRecognitionListener(listener)
                 self._recognizer.startListening(intent)
 
@@ -889,6 +1001,24 @@ class AndroidBridge(Bridge):
         except Exception as exc:
             self._emit("listen", exc)
             return Res(False, "не смогла включить микрофон: %s" % exc)
+
+    def _destroy_recognizer(self):
+        recognizer = self._recognizer
+        self._recognizer = None
+        if recognizer is None:
+            return
+        for method in ("cancel", "destroy"):
+            try:
+                getattr(recognizer, method)()
+            except Exception:
+                pass
+
+    def stop_listen(self):
+        def stop():
+            self._destroy_recognizer()
+        if self._run_on_ui(stop):
+            return Res(True, "")
+        return Res(False, "")
 
     # ------------------------------------------------------------------
     #  Wi-Fi
