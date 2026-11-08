@@ -78,8 +78,10 @@ class AndroidBridge(Bridge):
     can_voice = True
     can_notify = True
 
-    NOTIF_CHANNEL = "nika_messages"
+    NOTIF_CHANNEL = "nika_messages_v2"
     NOTIF_ID = 4101
+    ALARM_CHANNEL = "nika_alarm_v2"
+    ALARM_ID = 4102
 
     def __init__(self):
         super().__init__()
@@ -87,25 +89,14 @@ class AndroidBridge(Bridge):
         self._ctx = _activity() if _JAVA else None
         self._tts = None
         self._tts_ready = False
-        self._tts_voice_set = False
         self._listen_cb = None
         self._listener = None
         self._recognizer = None
         self._torch_id = None
         self._torch_on = False
-        self._audio = None
-        self._tone = None
-
-        # звуки — только если есть Java и Activity
-        if self._ok and self._ctx is not None:
-            try:
-                self._init_tts()
-            except Exception as exc:
-                self._emit("tts_init", exc)
-            try:
-                self._init_tap_sound()
-            except Exception as exc:
-                self._emit("tap_init", exc)
+        self._ringtone = None
+        if _JAVA and self._ctx is not None:
+            self._init_tts()
 
     # ------------------------------------------------------------------
     #  Служебное
@@ -440,67 +431,199 @@ class AndroidBridge(Bridge):
             return Res(False, "не смогла открыть настройки: %s" % exc)
 
     # ------------------------------------------------------------------
-    #  Уведомления и вибрация
+    #  Уведомления, звуки и системная шапка
     # ------------------------------------------------------------------
-    def notify(self, title, text):
+    def _notification_manager(self):
+        try:
+            Context = jclass("android.content.Context")
+            return self._ctx.getSystemService(Context.NOTIFICATION_SERVICE)
+        except Exception:
+            return None
+
+    def _ensure_channels(self, manager):
+        """Два канала: тихие сообщения и громкий «будильник» для таймера."""
         try:
             Build = jclass("android.os.Build$VERSION")
-            sdk = int(Build.SDK_INT)
-            Context = jclass("android.content.Context")
-            manager = self._ctx.getSystemService(Context.NOTIFICATION_SERVICE)
-            if manager is None:
-                return Res(False, "")
-            if sdk >= 33 and not self.has_permission("POST_NOTIFICATIONS"):
-                return Res(False, "нет разрешения на уведомления")
+            if int(Build.SDK_INT) < 26:
+                return
+            Channel = jclass("android.app.NotificationChannel")
+            RingtoneManager = jclass("android.media.RingtoneManager")
+            AudioAttributes = jclass("android.media.AudioAttributes")
 
-            default_sound = None
+            quiet = Channel(self.NOTIF_CHANNEL, "Nika", 3)
+            quiet.setDescription("Ответы, напоминания")
+            quiet.enableVibration(True)
+            manager.createNotificationChannel(quiet)
+
+            loud = Channel(self.ALARM_CHANNEL, "Nika — таймер", 4)
+            loud.setDescription("Таймер и будильник")
+            loud.enableVibration(True)
             try:
-                RingtoneManager = jclass("android.media.RingtoneManager")
-                default_sound = RingtoneManager.getDefaultUri(
-                    RingtoneManager.TYPE_NOTIFICATION)
-            except Exception:
-                default_sound = None
-
-            if sdk >= 26:
-                Channel = jclass("android.app.NotificationChannel")
-                channel = Channel(self.NOTIF_CHANNEL, "Nika", 4)  # IMPORTANCE_HIGH
-                try:
-                    if default_sound is not None:
-                        AudioAttributes = jclass("android.media.AudioAttributes")
-                        attrs = AudioAttributes.Builder() \
-                            .setUsage(AudioAttributes.USAGE_NOTIFICATION) \
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION) \
-                            .build()
-                        channel.setSound(default_sound, attrs)
-                except Exception:
-                    pass
-                try:
-                    channel.enableVibration(True)
-                except Exception:
-                    pass
-                manager.createNotificationChannel(channel)
-                Builder = jclass("android.app.Notification$Builder")
-                builder = Builder(self._ctx, self.NOTIF_CHANNEL)
-            else:
-                Builder = jclass("android.app.Notification$Builder")
-                builder = Builder(self._ctx)
-
-            icon = self._ctx.getApplicationInfo().icon
-            builder.setContentTitle(str(title))
-            builder.setContentText(str(text))
-            builder.setSmallIcon(icon)
-            builder.setAutoCancel(True)
-            try:
-                if sdk < 26 and default_sound is not None:
-                    builder.setSound(default_sound)
-                builder.setDefaults(-1)  # ALL: звук + вибрация + свет
+                loud.setVibrationPattern([0, 350, 180, 350, 180, 500])
             except Exception:
                 pass
-            manager.notify(self.NOTIF_ID, builder.build())
+            try:
+                uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                if uri is None:
+                    uri = RingtoneManager.getDefaultUri(
+                        RingtoneManager.TYPE_NOTIFICATION)
+                attributes = (AudioAttributes.Builder()
+                              .setUsage(AudioAttributes.USAGE_ALARM)
+                              .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                              .build())
+                loud.setSound(uri, attributes)
+            except Exception:
+                pass
+            try:
+                loud.setBypassDnd(True)
+            except Exception:
+                pass
+            manager.createNotificationChannel(loud)
+        except Exception as exc:
+            self._emit("channels", exc)
+
+    def _build_notification(self, title, text, urgent=False):
+        Build = jclass("android.os.Build$VERSION")
+        sdk = int(Build.SDK_INT)
+        Notification = jclass("android.app.Notification")
+        Builder = jclass("android.app.Notification$Builder")
+        if sdk >= 26:
+            channel = self.ALARM_CHANNEL if urgent else self.NOTIF_CHANNEL
+            builder = Builder(self._ctx, channel)
+        else:
+            builder = Builder(self._ctx)
+        icon = self._ctx.getApplicationInfo().icon
+        builder.setContentTitle(str(title))
+        builder.setContentText(str(text))
+        builder.setSmallIcon(icon)
+        builder.setAutoCancel(True)
+        builder.setOnlyAlertOnce(False)
+        try:
+            builder.setWhen(int(time.time() * 1000))
+        except Exception:
+            pass
+        if urgent:
+            try:
+                builder.setCategory(Notification.CATEGORY_ALARM)
+                builder.setPriority(Notification.PRIORITY_MAX)
+                builder.setDefaults(Notification.DEFAULT_ALL)
+                builder.setVisibility(Notification.VISIBILITY_PUBLIC)
+            except Exception:
+                pass
+        else:
+            try:
+                builder.setPriority(Notification.PRIORITY_DEFAULT)
+            except Exception:
+                pass
+        return builder
+
+    def notify(self, title, text):
+        try:
+            manager = self._notification_manager()
+            if manager is None:
+                return Res(False, "")
+            Build = jclass("android.os.Build$VERSION")
+            if int(Build.SDK_INT) >= 33 and not self.has_permission("POST_NOTIFICATIONS"):
+                return Res(False, "нет разрешения на уведомления")
+            self._ensure_channels(manager)
+            manager.notify(self.NOTIF_ID,
+                           self._build_notification(title, text).build())
             return Res(True, "")
         except Exception as exc:
             self._emit("notify", exc)
             return Res(False, str(exc))
+
+    def notify_alarm(self, title, text):
+        try:
+            manager = self._notification_manager()
+            if manager is None:
+                return Res(False, "")
+            Build = jclass("android.os.Build$VERSION")
+            if int(Build.SDK_INT) >= 33 and not self.has_permission("POST_NOTIFICATIONS"):
+                return Res(False, "нет разрешения на уведомления")
+            self._ensure_channels(manager)
+            manager.notify(self.ALARM_ID,
+                           self._build_notification(title, text, urgent=True).build())
+            return Res(True, "")
+        except Exception as exc:
+            self._emit("notify_alarm", exc)
+            return Res(False, str(exc))
+
+    def click(self):
+        """Короткий системный клик — без мелодий и задержек."""
+        try:
+            Context = jclass("android.content.Context")
+            AudioManager = jclass("android.media.AudioManager")
+            manager = self._ctx.getSystemService(Context.AUDIO_SERVICE)
+            if manager is None:
+                return Res(False, "")
+            manager.playSoundEffect(0, 0.35)  # SoundEffectConstants.CLICK
+            return Res(True, "")
+        except Exception:
+            return Res(False, "")
+
+    def alarm_sound(self):
+        """Звенит будильником, пока не остановят (не дольше 8 секунд)."""
+        try:
+            self.stop_sound()
+            RingtoneManager = jclass("android.media.RingtoneManager")
+            AudioManager = jclass("android.media.AudioManager")
+            uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+            if uri is None:
+                uri = RingtoneManager.getDefaultUri(
+                    RingtoneManager.TYPE_NOTIFICATION)
+            ringtone = RingtoneManager.getRingtone(self._ctx, uri)
+            ringtone.setStreamType(AudioManager.STREAM_ALARM)
+            self._ringtone = ringtone
+            ringtone.play()
+            timer = threading.Timer(8.0, self.stop_sound)
+            timer.daemon = True
+            timer.start()
+            return Res(True, "")
+        except Exception as exc:
+            self._emit("alarm_sound", exc)
+            return Res(False, str(exc))
+
+    def stop_sound(self):
+        try:
+            if self._ringtone is not None:
+                self._ringtone.stop()
+                self._ringtone = None
+            return Res(True, "")
+        except Exception:
+            self._ringtone = None
+            return Res(False, "")
+
+    def hide_system_bars(self):
+        """Прячет системную шапку с названием приложения."""
+        def apply():
+            hidden = False
+            try:
+                self._ctx.setTitle("")
+                hidden = True
+            except Exception:
+                pass
+            for getter in ("getSupportActionBar", "getActionBar"):
+                try:
+                    bar = getattr(self._ctx, getter)()
+                    if bar is not None:
+                        bar.hide()
+                        hidden = True
+                except Exception:
+                    pass
+            try:
+                Color = jclass("android.graphics.Color")
+                window = self._ctx.getWindow()
+                window.setStatusBarColor(Color.parseColor("#0d0d0f"))
+                window.setNavigationBarColor(Color.parseColor("#0d0d0f"))
+                hidden = True
+            except Exception:
+                pass
+            return hidden
+
+        if self._run_on_ui(apply):
+            return Res(True, "")
+        return Res(bool(apply()), "")
 
     def vibrate(self, ms=40):
         try:
@@ -514,66 +637,6 @@ class AndroidBridge(Bridge):
                 vibrator.vibrate(VibrationEffect.createOneShot(int(ms), -1))
             else:
                 vibrator.vibrate(int(ms))
-            return Res(True, "")
-        except Exception:
-            return Res(False, "")
-
-    # ------------------------------------------------------------------
-    #  Короткие звуки
-    # ------------------------------------------------------------------
-    def _init_tap_sound(self):
-        try:
-            Context = jclass("android.content.Context")
-            self._audio = self._ctx.getSystemService(Context.AUDIO_SERVICE)
-        except Exception as exc:
-            self._audio = None
-            self._emit("tap_init", exc)
-
-    def beep(self):
-        """Один короткий звук уведомления."""
-        try:
-            RingtoneManager = jclass("android.media.RingtoneManager")
-            uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-            ringtone = RingtoneManager.getRingtone(self._ctx, uri)
-            if ringtone is None:
-                return Res(False, "")
-            try:
-                Build = jclass("android.os.Build$VERSION")
-                if int(Build.SDK_INT) >= 21:
-                    AudioAttributes = jclass("android.media.AudioAttributes")
-                    attrs = AudioAttributes.Builder() \
-                        .setUsage(AudioAttributes.USAGE_NOTIFICATION) \
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION) \
-                        .build()
-                    ringtone.setAudioAttributes(attrs)
-            except Exception:
-                pass
-            ringtone.play()
-            return Res(True, "")
-        except Exception as exc:
-            self._emit("beep", exc)
-            return Res(False, "")
-
-    def tap(self):
-        """Короткий тихий клик нажатия (~20–30 мс)."""
-        try:
-            if self._audio is None:
-                Context = jclass("android.content.Context")
-                self._audio = self._ctx.getSystemService(Context.AUDIO_SERVICE)
-            AudioManager = jclass("android.media.AudioManager")
-            if self._audio is not None:
-                self._audio.playSoundEffect(
-                    AudioManager.FX_KEYPRESS_STANDARD, 0.35)
-                return Res(True, "")
-        except Exception:
-            pass
-        try:
-            if self._tone is None:
-                ToneGenerator = jclass("android.media.ToneGenerator")
-                AudioManager = jclass("android.media.AudioManager")
-                self._tone = ToneGenerator(AudioManager.STREAM_SYSTEM, 25)
-            ToneGenerator = jclass("android.media.ToneGenerator")
-            self._tone.startTone(ToneGenerator.TONE_PROP_BEEP, 15)
             return Res(True, "")
         except Exception:
             return Res(False, "")
@@ -609,77 +672,80 @@ class AndroidBridge(Bridge):
         try:
             Locale = jclass("java.util.Locale")
             self._tts.setLanguage(Locale("ru", "RU"))
-            self._tts.setSpeechRate(0.94)
-            self._tts.setPitch(1.06)
         except Exception as exc:
             self._emit("tts_lang", exc)
-        self._select_female_voice()
+        try:
+            AudioAttributes = jclass("android.media.AudioAttributes")
+            attributes = (AudioAttributes.Builder()
+                          .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                          .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                          .build())
+            self._tts.setAudioAttributes(attributes)
+        except Exception:
+            pass
+        self._configure_voice()
 
-    def _select_female_voice(self):
-        """Ищем ru-RU voice с признаком female (или по имени)."""
-        if self._tts is None or self._tts_voice_set:
-            return
+    def _configure_voice(self):
+        """Выбирает женский русский голос, а не «переводчика» по умолчанию."""
+        best = None
+        best_score = -1
         try:
             voices = self._tts.getVoices()
-            if voices is None:
-                return
-            chosen = None
-            fallback = None
-            for voice in voices:
+            iterator = voices.iterator() if voices is not None else None
+            while iterator is not None and iterator.hasNext():
+                voice = iterator.next()
                 try:
-                    locale = voice.getLocale()
-                    if locale is None:
-                        continue
-                    lang = str(locale.getLanguage() or "").lower()
-                    if lang != "ru":
-                        continue
-                    name = str(voice.getName() or "").lower()
-                    try:
-                        features = set(str(f).lower() for f in voice.getFeatures())
-                    except Exception:
-                        features = set()
-                    female_marker = ("female" in name or "жен" in name or
-                                     "female" in features or
-                                     name.endswith("-f") or "-f-" in name)
-                    offline = True
-                    try:
-                        offline = not voice.isNetworkConnectionRequired()
-                    except Exception:
-                        pass
-                    if female_marker and offline:
-                        chosen = voice
-                        break
-                    if fallback is None and offline:
-                        fallback = voice
+                    language = str(voice.getLocale().getLanguage()).lower()
                 except Exception:
                     continue
-            target = chosen or fallback
-            if target is not None:
-                self._tts.setVoice(target)
-                self._tts_voice_set = True
-                self._tts.setPitch(1.08 if chosen else 1.04)
-                self._tts.setSpeechRate(0.94)
+                if language != "ru":
+                    continue
+                name = ""
+                try:
+                    name = str(voice.getName()).lower()
+                except Exception:
+                    pass
+                features = ""
+                try:
+                    feature_set = voice.getFeatures()
+                    if feature_set is not None:
+                        feature_iterator = feature_set.iterator()
+                        while feature_iterator.hasNext():
+                            features += str(feature_iterator.next()).lower() + " "
+                except Exception:
+                    pass
+                score = 0
+                if "female" in features or "female" in name:
+                    score += 6
+                if "ruf" in name:      # ruf — женские голоса Google
+                    score += 4
+                if "rur" in name:
+                    score += 1
+                try:
+                    if voice.isNetworkConnectionRequired():
+                        score += 0   # сетевой голос может не работать без интернета
+                    else:
+                        score += 3   # локальный женский голос — приоритет
+                except Exception:
+                    pass
+                if score > best_score:
+                    best_score = score
+                    best = voice
+            if best is not None:
+                self._tts.setVoice(best)
         except Exception as exc:
-            self._emit("tts_voice", exc)
+            self._emit("voice_choice", exc)
+        # чуть выше и медленнее — убирает «робота из переводчика»
+        try:
+            self._tts.setPitch(1.08)
+            self._tts.setSpeechRate(0.95)
+        except Exception:
+            pass
 
-    def speak(self, text, female=True):
+    def speak(self, text):
         if not text or self._tts is None or not self._tts_ready:
             return Res(False, "")
         try:
-            if female and not self._tts_voice_set:
-                self._select_female_voice()
-            if female:
-                try:
-                    self._tts.setPitch(1.08)
-                    self._tts.setSpeechRate(0.94)
-                except Exception:
-                    pass
-            else:
-                try:
-                    self._tts.setPitch(0.96)
-                    self._tts.setSpeechRate(1.0)
-                except Exception:
-                    pass
             self._tts.speak(text, 0, None, "nika-%d" % int(time.time() * 1000))
             return Res(True, "")
         except Exception as exc:
@@ -791,6 +857,7 @@ class AndroidBridge(Bridge):
             listener = self._make_listener(callback)
 
             def start():
+                # SpeechRecognizer положено создавать и запускать в UI-потоке
                 if self._recognizer is None:
                     self._recognizer = SpeechRecognizer.createSpeechRecognizer(self._ctx)
                 self._recognizer.setRecognitionListener(listener)
