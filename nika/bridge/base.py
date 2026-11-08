@@ -110,8 +110,7 @@ class Bridge:
         return Res(False, "")
 
     # ---------- голос ----------
-    def speak(self, text: str, female: bool = True) -> Res:
-        """female=True — просим женский голос, если мост умеет."""
+    def speak(self, text: str) -> Res:
         return Res(False, "")
 
     def stop_speak(self) -> Res:
@@ -120,11 +119,24 @@ class Bridge:
     def listen(self, callback: Callable[[Optional[str]], None]) -> Res:
         return Res(False, "голосовой ввод работает на телефоне.")
 
-    # ---------- короткие звуки (не обязательны для реализации) ----------
-    def beep(self) -> Res:
+    # ---------- звук и системная шапка ----------
+    def click(self) -> Res:
+        """Короткий звук нажатия кнопки."""
         return Res(False, "")
 
-    def tap(self) -> Res:
+    def notify_alarm(self, title: str, text: str) -> Res:
+        """Уведомление, которое звенит (таймер, напоминание)."""
+        return self.notify(title, text)
+
+    def alarm_sound(self) -> Res:
+        """Звенит сам, даже если приложение открыто."""
+        return Res(False, "")
+
+    def stop_sound(self) -> Res:
+        return Res(False, "")
+
+    def hide_system_bars(self) -> Res:
+        """Прячет системную шапку с названием приложения."""
         return Res(False, "")
 
     # ---------- wi-fi ----------
